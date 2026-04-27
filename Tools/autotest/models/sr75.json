@@ -1,0 +1,65 @@
+{
+    "description": "SR-75 Jet Powered UAV - 82.5kg, 800N thrust",
+
+    "mass": 82.5,
+    "momentOfInertia": [8.5, 12.0, 18.0],
+
+    "dragCoefficient": 0.025,
+    "liftCoefficient": 0.8,
+    "sideForceCoefficient": 0.1,
+
+    "wingArea": 1.0,
+    "wingspan": 1.6,
+    "chord": 0.625,
+
+    "maxThrust": 800.0,
+    "minThrust": 0.0,
+    "hoverThrottle": 0.0,
+
+    "stallSpeed": 34.0,
+    "maxSpeed": 125.0,
+
+    "rollTimeConstant": 0.3,
+    "pitchTimeConstant": 0.3,
+    "yawTimeConstant": 0.5,
+
+    "rollMax": 60.0,
+    "pitchMax": 30.0,
+
+    "elevonMixing": false,
+    "hasTail": true,
+
+    "propEfficiency": 1.0,
+
+    "CL0": 0.2,
+    "CLalpha": 5.0,
+    "CLmax": 1.2,
+    "CLmin": -0.5,
+
+    "CD0": 0.025,
+    "CDalpha": 0.03,
+    "CDbeta": 0.04,
+
+    "Cm0": 0.0,
+    "Cmalpha": -0.5,
+    "Cmq": -15.0,
+    "Cmde": -1.2,
+
+    "Clbeta": -0.1,
+    "Clp": -0.5,
+    "Clr": 0.1,
+    "Clda": 0.2,
+    "Cldr": 0.01,
+
+    "Cnbeta": 0.1,
+    "Cnp": -0.03,
+    "Cnr": -0.15,
+    "Cnda": 0.0,
+    "Cndr": -0.1,
+
+    "CYbeta": -0.3,
+    "CYp": 0.0,
+    "CYr": 0.2,
+    "CYda": 0.0,
+    "CYdr": 0.15
+}

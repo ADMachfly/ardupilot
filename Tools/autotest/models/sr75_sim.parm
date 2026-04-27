@@ -1,0 +1,13 @@
+# =============================================
+# SR-75 SIM Physics Override
+# These control the SITL physics engine
+# =============================================
+
+# Aircraft model physics
+SIM_SPEEDUP 1
+SIM_WIND_SPD 0
+SIM_WIND_DIR 0
+
+# Engine simulation
+SIM_ENGINE_MUL 1.0
+SIM_ENGINE_FAIL 0

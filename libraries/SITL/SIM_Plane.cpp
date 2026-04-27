@@ -58,6 +58,12 @@ Plane::Plane(const char *frame_str) :
         mass = 22;
         thrust_scale = (mass * GRAVITY_MSS) / hover_throttle;
     }
+    if (strstr(frame_str, "-sr75")) {
+        // SR-75 jet powered UAV - 82.5kg, 800N thrust, 125 m/s max
+        mass = 82.5;
+        thrust_scale = 800.0 / hover_throttle;
+        coefficient.c_drag_p = 0.025;
+    }
     if (strstr(frame_str, "-revthrust")) {
         reverse_thrust = true;
     }
