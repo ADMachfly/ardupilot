@@ -104,7 +104,7 @@
 // AIRSPEED_CRUISE
 //
 #ifndef AIRSPEED_CRUISE
- # define AIRSPEED_CRUISE                12 // 12 m/s
+ # define AIRSPEED_CRUISE                100 // 12 m/s edited to 100 m/s
 #endif
 
 
@@ -121,10 +121,10 @@
 // FLY_BY_WIRE_B airspeed control
 //
 #ifndef AIRSPEED_FBW_MIN
- # define AIRSPEED_FBW_MIN               9
+ # define AIRSPEED_FBW_MIN               45
 #endif
 #ifndef AIRSPEED_FBW_MAX
- # define AIRSPEED_FBW_MAX               22
+ # define AIRSPEED_FBW_MAX               150
 #endif
 
 #ifndef CRUISE_ALT_FLOOR

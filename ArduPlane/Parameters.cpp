@@ -289,7 +289,7 @@ const AP_Param::Info Plane::var_info[] = {
     // @DisplayName: Minimum Airspeed
     // @Description: Minimum airspeed demanded in automatic throttle modes. Should be set to 20% higher than level flight stall speed.
     // @Units: m/s
-    // @Range: 5 100
+    // @Range: 45 150
     // @Increment: 1
     // @User: Standard
     ASCALAR(airspeed_min, "AIRSPEED_MIN",  AIRSPEED_FBW_MIN),
@@ -298,7 +298,7 @@ const AP_Param::Info Plane::var_info[] = {
     // @DisplayName: Maximum Airspeed
     // @Description: Maximum airspeed demanded in automatic throttle modes. Should be set slightly less than level flight speed at THR_MAX and also at least 50% above AIRSPEED_MIN to allow for accurate TECS altitude control.
     // @Units: m/s
-    // @Range: 5 100
+    // @Range: 5 150
     // @Increment: 1
     // @User: Standard
     ASCALAR(airspeed_max, "AIRSPEED_MAX",  AIRSPEED_FBW_MAX),
@@ -307,7 +307,7 @@ const AP_Param::Info Plane::var_info[] = {
     // @DisplayName: Stall airspeed
     // @Description: If stall prevention is enabled this speed is used to calculate the minimum airspeed while banking. It is also used during landing final as the minimum airspeed that can be demanded by the TECS, which allows using TECS_LAND_ARSPD or LAND_PF_ARSPD to achieve landings slower than AIRSPEED_MIN. If this is set to 0 then the stall speed is assumed to be the minimum airspeed speed. Typically set slightly higher then true stall speed.
     // @Units: m/s
-    // @Range: 5 75
+    // @Range: 5 150
     // @User: Standard
     ASCALAR(airspeed_stall, "AIRSPEED_STALL", 0),
 
