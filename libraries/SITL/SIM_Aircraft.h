@@ -197,7 +197,6 @@ public:
 #endif  // AP_SIM_MOUNT_ENABLED
 
     ADSB *adsb;
-
     // takes a PWM range between 1000 and 2000 and returns a floating
     // point value between -1 and 1
     float normalise_servo_input(uint16_t input) const {
@@ -384,8 +383,12 @@ protected:
         bool currently_clamped;
         bool grab_attempted;  // avoid warning multiple times about missed grab
     } clamp;
+    void update_initial_heading_to_mission_wp();
+bool find_first_real_mission_waypoint(Location &wp) const;
 
-private:
+bool align_initial_heading_to_mission_wp;
+bool initial_heading_aligned_to_mission_wp;
+    private:
     uint64_t last_time_us;
     uint32_t frame_counter;
     uint32_t last_ground_contact_ms;
@@ -448,7 +451,6 @@ private:
     Mount *gimbal_sims[GIMBAL_SIM_MAX];
 #endif
 };
-
 } // namespace SITL
 
 #endif // AP_SIM_ENABLED

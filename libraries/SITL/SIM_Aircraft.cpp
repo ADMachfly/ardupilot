@@ -19,6 +19,7 @@
 #include "SIM_Aircraft.h"
 
 #include <stdio.h>
+#include <string.h>
 #include <sys/time.h>
 #include <unistd.h>
 
@@ -33,6 +34,7 @@
 #include <AP_Filesystem/AP_Filesystem.h>
 #include <AP_AHRS/AP_AHRS.h>
 #include <AP_HAL_SITL/HAL_SITL_Class.h>
+#include <AP_Mission/AP_Mission.h>
 #include <AP_Vehicle/AP_Vehicle_Type.h>
 
 using namespace SITL;
@@ -76,6 +78,9 @@ Aircraft::Aircraft(const char *frame_str)
     for (uint8_t i = 0; i < ARRAY_SIZE(rangefinder_m); i++){
         rangefinder_m[i] = nanf("");
     }
+
+    align_initial_heading_to_mission_wp = frame_str != nullptr && strstr(frame_str, "sr75") != nullptr;
+    initial_heading_aligned_to_mission_wp = false;
 }
 
 void Aircraft::set_start_location(const Location &start_loc, const float start_yaw)
@@ -709,6 +714,76 @@ void Aircraft::update_home()
         };
         set_start_location(loc, sitl->opos.hdg.get());
     }
+    update_initial_heading_to_mission_wp();
+}
+bool Aircraft::find_first_real_mission_waypoint(Location &wp) const
+{
+#if AP_MISSION_ENABLED
+    AP_Mission *mission = AP::mission();
+    if (mission == nullptr || mission->num_commands() < 2) {
+        return false;
+    }
+
+    for (uint16_t i = 1; i < mission->num_commands(); i++) {
+        AP_Mission::Mission_Command cmd;
+        if (!mission->read_cmd_from_storage(i, cmd)) {
+            continue;
+        }
+
+        switch (cmd.id) {
+        case MAV_CMD_NAV_TAKEOFF:
+        case MAV_CMD_DO_CHANGE_SPEED:
+        case MAV_CMD_NAV_DELAY:
+            continue;
+
+        case MAV_CMD_NAV_WAYPOINT:
+            if (cmd.content.location.initialised()) {
+                wp = cmd.content.location;
+                return true;
+            }
+            break;
+
+        default:
+            continue;
+        }
+    }
+#endif
+    return false;
+}
+
+void Aircraft::update_initial_heading_to_mission_wp()
+{
+#if AP_MISSION_ENABLED
+    if (!align_initial_heading_to_mission_wp ||
+        initial_heading_aligned_to_mission_wp ||
+        !home_is_set ||
+        !on_ground()) {
+        return;
+    }
+
+    Location wp;
+    if (!find_first_real_mission_waypoint(wp)) {
+        return;
+    }
+
+    const float bearing_deg = wrap_360(home.get_bearing_to(wp) * 0.01f);
+
+    float roll;
+    float pitch;
+    dcm.to_euler(&roll, &pitch, nullptr);
+
+    home_yaw = bearing_deg;
+    dcm.from_euler(roll, pitch, radians(home_yaw));
+
+    if (sitl != nullptr) {
+        sitl->opos.hdg.set(home_yaw);
+    }
+
+    initial_heading_aligned_to_mission_wp = true;
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                  "SITL: initial heading aligned to first mission waypoint %.1f deg",
+                  home_yaw);
+#endif
 }
 
 void Aircraft::update_model(const struct sitl_input &input)
@@ -1448,4 +1523,3 @@ bool SITL::SIM::set_pose(uint8_t instance, const Location &loc, const Quaternion
 {
     return Aircraft::set_pose(instance, loc, quat, velocity_ef, gyro_rads);
 }
-
