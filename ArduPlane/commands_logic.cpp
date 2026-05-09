@@ -395,6 +395,12 @@ void Plane::do_takeoff(const AP_Mission::Mission_Command& cmd)
     steer_state.locked_course_err = 0;
     steer_state.hold_course_cd = -1;
     auto_state.baro_takeoff_alt = barometer.get_altitude();
+
+    // SR-75 RATO: initialise state machine on TAKEOFF command
+    if (g2.rato.enable.get() > 0) {
+        g2.rato.init();
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RATO: initialized");
+    }
 }
 
 void Plane::do_nav_wp(const AP_Mission::Mission_Command& cmd)
@@ -566,6 +572,18 @@ void ModeAuto::do_nav_delay(const AP_Mission::Mission_Command& cmd)
 /********************************************************************************/
 bool Plane::verify_takeoff()
 {
+    // SR-75 RATO: update state machine during TAKEOFF verification
+    if (g2.rato.enable.get() > 0 && g2.rato.is_active()) {
+        const bool rato_done = g2.rato.update();
+
+        if (g2.rato.is_aborted()) {
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "RATO: aborted, falling back to normal takeoff");
+            // fall through to normal takeoff verification below
+        } else {
+            return rato_done;
+        }
+    }
+        
     bool trust_ahrs_yaw = AP::ahrs().initialised();
 #if AP_AHRS_DCM_ENABLED
     trust_ahrs_yaw |= ahrs.dcm_yaw_initialised();
