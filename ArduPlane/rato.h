@@ -7,9 +7,32 @@ class RATOController {
 public:
     static const struct AP_Param::GroupInfo var_info[];
     
+        enum class State : uint8_t {
+        DISABLED = 0,
+        READY,
+        IGNITION,
+        BOOST,
+        BURNOUT,
+        ENGINE_TAKEOVER,
+        EJECT,
+        COMPLETE,
+        ABORT
+        };
+
     RATOController();
-    void update() { }
+
+    void reset();
+    void init();
+    bool update();
+
+    bool is_active() const;
+    bool is_complete() const;
+    bool is_aborted() const;
+
+    State get_state() const { return state; }
+    const char *state_name() const;
     
+    // Parameters
     AP_Int8     enable;             // RATO_ENABLE   0=off 1=on
     AP_Float    thrust_n;           // RATO_THR_N    booster thrust [N]
     AP_Float    mass_kg;            // RATO_MASS_KG  booster mass [kg]
@@ -24,4 +47,9 @@ public:
     AP_Int8     ign_chan;           // RATO_IGN_CH   relay/servo channel for ignition (1-based)
     AP_Int8     eject_chan;         // RATO_EJECT_CH relay/servo channel for ejection (1-based)
 
+private:
+    State state;
+    uint32_t start_ms;
+
+    float elapsed_s() const;    
 };

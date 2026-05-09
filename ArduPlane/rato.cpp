@@ -1,4 +1,29 @@
+/*
+ * RATO.cpp  –  Rocket-Assisted Take-Off manager for ArduPlane
+ *
+ * SR-75 reference numbers
+ *   Airframe  : 80 kg
+ *   Booster   : 10 kg, 5800 N, 3 s burn
+ *   Target release envelope : 600 m ground-track / 160 m AGL / 180 m/s
+ *   Expected boost acceleration : ~6.5 g (64 m/s²) before aero losses
+ *
+ * This file is self-contained.  The only external call-sites are:
+ *   commands_logic.cpp :: do_takeoff()     → rato.init()
+ *   takeoff.cpp        :: verify_takeoff() → rato.update() / rato.is_complete()
+ *   Plane.cpp          :: (scheduler)      → rato.write_log()   [optional]
+ *   SIM_Plane.cpp      :: update()         → RATOPhysics helpers
+ */
+
 #include "rato.h"
+
+#include <AP_HAL/AP_HAL.h>
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  Parameter table
+//  NOTE: indices must not collide with other ParametersG2 sub-groups.
+//  Safe to start at index 50 if the project has not used that block yet;
+//  adjust if needed.
+// ══════════════════════════════════════════════════════════════════════════════
 
 const AP_Param::GroupInfo RATOController::var_info[] = {
 
@@ -91,8 +116,118 @@ const AP_Param::GroupInfo RATOController::var_info[] = {
     AP_GROUPEND
 };
 
-RATOController::RATOController()
+RATOController::RATOController() :
+    state(State::DISABLED),
+    start_ms(0)
 {
     AP_Param::setup_object_defaults(this, var_info);
 
+}
+
+void RATOController::reset()
+{
+    state = State::DISABLED;
+    start_ms = 0;
+}
+
+void RATOController::init()
+{
+    if (enable.get() <= 0) {
+        reset();
+        return;
+    }
+
+    start_ms = AP_HAL::millis();
+    state = State::READY;
+}
+
+bool RATOController::update()
+{
+    if (enable.get() <= 0) {
+        reset();
+        return true;
+    }
+
+    if (timeout_s.get() > 0.0f && elapsed_s() > timeout_s.get()) {
+        state = State::ABORT;
+        return true;
+    }
+
+    switch (state) {
+    case State::DISABLED:
+        return true;
+
+    case State::READY:
+        state = State::IGNITION;
+        return false;
+
+    case State::IGNITION:
+        state = State::BOOST;
+        return false;
+
+    case State::BOOST:
+        if (elapsed_s() >= burn_time.get()) {
+            state = State::BURNOUT;
+        }
+        return false;
+
+    case State::BURNOUT:
+        state = State::ENGINE_TAKEOVER;
+        return false;
+
+    case State::ENGINE_TAKEOVER:
+        state = State::EJECT;
+        return false;
+
+    case State::EJECT:
+        state = State::COMPLETE;
+        return true;
+
+    case State::COMPLETE:
+    case State::ABORT:
+    default:
+        return true;
+    }
+}
+
+bool RATOController::is_active() const
+{
+    return state != State::DISABLED &&
+           state != State::COMPLETE &&
+           state != State::ABORT;
+}
+
+bool RATOController::is_complete() const
+{
+    return state == State::COMPLETE;
+}
+
+bool RATOController::is_aborted() const
+{
+    return state == State::ABORT;
+}
+
+float RATOController::elapsed_s() const
+{
+    if (start_ms == 0) {
+        return 0.0f;
+    }
+
+    return (AP_HAL::millis() - start_ms) * 0.001f;
+}
+
+const char *RATOController::state_name() const
+{
+    switch (state) {
+    case State::DISABLED:        return "DISABLED";
+    case State::READY:           return "READY";
+    case State::IGNITION:        return "IGNITION";
+    case State::BOOST:           return "BOOST";
+    case State::BURNOUT:         return "BURNOUT";
+    case State::ENGINE_TAKEOVER: return "ENGINE_TAKEOVER";
+    case State::EJECT:           return "EJECT";
+    case State::COMPLETE:        return "COMPLETE";
+    case State::ABORT:           return "ABORT";
+    default:                     return "UNKNOWN";
+    }
 }
