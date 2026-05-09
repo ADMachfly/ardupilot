@@ -8,6 +8,7 @@
  */
 
 const AP_Param::Info Plane::var_info[] = {
+
     // @Param: FORMAT_VERSION
     // @DisplayName: Eeprom format version number
     // @Description: This value is incremented when changes are made to the eeprom format
@@ -1290,6 +1291,7 @@ const AP_Param::GroupInfo ParametersG2::var_info[] = {
     AP_GROUPINFO("RNGFND_LND_DIST", 41, ParametersG2, rangefinder_land_engage_dist_m, 0),
 #endif
 
+    AP_SUBGROUPINFO(rato, "RATO_", 42, ParametersG2, RATOController),
     AP_GROUPEND
 };
 

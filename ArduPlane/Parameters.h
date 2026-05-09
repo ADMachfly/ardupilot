@@ -3,6 +3,7 @@
 #define AP_PARAM_VEHICLE_NAME plane
 
 #include <AP_Common/AP_Common.h>
+#include "rato.h"
 
 // Global parameter class.
 //
@@ -371,6 +372,8 @@ public:
         k_param_mode_autoland,
         k_param__gcs,
 
+        k_param_rato_controller = 274,
+
     };
 
     AP_Int16 format_version;
@@ -482,6 +485,9 @@ public:
     static const struct AP_Param::GroupInfo var_info[];
 
     // just to make compilation easier when all things are compiled out...
+    
+    RATOController rato;
+
     uint8_t unused_integer;
 
     // button reporting library
