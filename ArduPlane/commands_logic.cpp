@@ -396,9 +396,29 @@ void Plane::do_takeoff(const AP_Mission::Mission_Command& cmd)
     steer_state.hold_course_cd = -1;
     auto_state.baro_takeoff_alt = barometer.get_altitude();
 
-    // SR-75 RATO: initialise state machine on TAKEOFF command
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RATO DBG: do_takeoff enable=%d", (int)g2.rato.enable.get());
+
+    // SR-75 RATO: initialise state machine on TAKEOFF command.
+    //
+    // This does not apply RATO physics.
+    // It only captures the launch reference point and starts the
+    // autopilot-side RATO state machine.
     if (g2.rato.enable.get() > 0) {
-        g2.rato.init();
+        Location launch_loc;
+        float launch_alt = 0.0f;
+
+        // Use EKF/GPS location as launch reference.
+        // If unavailable, fall back to current_loc.
+        if (!ahrs.get_location(launch_loc)) {
+            launch_loc = current_loc;
+        }
+
+        // get_relative_position_D_home() gives Down position from home.
+        // Above home is therefore negative Down, so altitude above home = -D.
+        ahrs.get_relative_position_D_home(launch_alt);
+        launch_alt = -launch_alt;
+
+        g2.rato.init(launch_loc, launch_alt);
         GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RATO: initialized");
     }
 }
@@ -572,14 +592,52 @@ void ModeAuto::do_nav_delay(const AP_Mission::Mission_Command& cmd)
 /********************************************************************************/
 bool Plane::verify_takeoff()
 {
-    // SR-75 RATO: update state machine during TAKEOFF verification
+    // SR-75 RATO: update state machine during TAKEOFF verification.
+    //
+    // RATOController receives measured values from ArduPlane/EKF:
+    //   distance from launch point
+    //   altitude gain from launch
+    //   current speed
+    //
+    // It returns false while RATO sequence is still active.
+    // It returns true when RATO sequence is complete/aborted.
+
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                  "RATO DBG: verify enable=%d active=%d",
+                  (int)g2.rato.enable.get(),
+                  (int)g2.rato.is_active());
+                  
     if (g2.rato.enable.get() > 0 && g2.rato.is_active()) {
-        const bool rato_done = g2.rato.update();
+        Location now_loc;
+        float dist_m = 0.0f;
+    //  float alt_down = 0.0f;
+        float alt_gain_m = 0.0f;
+
+        // Distance from the TAKEOFF start position.
+        if (ahrs.get_location(now_loc)) {
+            dist_m = now_loc.get_distance(prev_WP_loc);
+        }
+
+    // Altitude gain from TAKEOFF start.
+    // auto_state.baro_takeoff_alt was captured in do_takeoff().
+        alt_gain_m = barometer.get_altitude() - auto_state.baro_takeoff_alt;
+
+        if (alt_gain_m < 0.0f) {
+            alt_gain_m = 0.0f;
+        }
+
+        // Groundspeed is used for this step.
+        // Later this can be changed to airspeed if airspeed sensor is reliable.
+        const float speed_mps = ahrs.groundspeed();
+
+        const bool rato_done = g2.rato.update(dist_m, alt_gain_m, speed_mps);
 
         if (g2.rato.is_aborted()) {
             GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "RATO: aborted, falling back to normal takeoff");
-            // fall through to normal takeoff verification below
+            // Fall through to normal ArduPlane takeoff verification below.
         } else {
+            // While RATO is active, prevent normal TAKEOFF from completing.
+            // Once RATO completes, this returns true and mission advances.
             return rato_done;
         }
     }

@@ -118,7 +118,11 @@ const AP_Param::GroupInfo RATOController::var_info[] = {
 
 RATOController::RATOController() :
     state(State::DISABLED),
-    start_ms(0)
+    start_ms(0),
+    launch_alt_m(0.0f),
+    last_dist_m(0.0f),
+    last_alt_gain_m(0.0f),
+    last_speed_mps(0.0f)
 {
     AP_Param::setup_object_defaults(this, var_info);
 
@@ -128,26 +132,50 @@ void RATOController::reset()
 {
     state = State::DISABLED;
     start_ms = 0;
+
+    // Clear launch reference and measured values.
+    launch_alt_m = 0.0f;
+    last_dist_m = 0.0f;
+    last_alt_gain_m = 0.0f;
+    last_speed_mps = 0.0f;
 }
 
-void RATOController::init()
+void RATOController::init(const Location& loc, float alt_m)
 {
     if (enable.get() <= 0) {
         reset();
         return;
     }
 
+        // Store launch reference.
+    launch_location = loc;
+    launch_alt_m = alt_m;
+
+    // Start RATO timer.
     start_ms = AP_HAL::millis();
+
+    // Clear previous measured values.
+    last_dist_m = 0.0f;
+    last_alt_gain_m = 0.0f;
+    last_speed_mps = 0.0f;
+     
+    // Enter active state machine.    
     state = State::READY;
 }
 
-bool RATOController::update()
+bool RATOController::update(float dist_m, float alt_gain_m, float speed_mps)
 {
     if (enable.get() <= 0) {
         reset();
         return true;
     }
 
+    // Store latest measured values for envelope checking.
+    last_dist_m = dist_m;
+    last_alt_gain_m = alt_gain_m;
+    last_speed_mps = speed_mps;
+    
+    // Timeout safety: prevents staying stuck in RATO forever.    
     if (timeout_s.get() > 0.0f && elapsed_s() > timeout_s.get()) {
         state = State::ABORT;
         return true;
@@ -155,43 +183,92 @@ bool RATOController::update()
 
     switch (state) {
     case State::DISABLED:
+    // No RATO action. Let normal takeoff continue.
         return true;
 
     case State::READY:
+    // Placeholder state before ignition command.
+    // Later this can check EKF/GPS/arming conditions.
         state = State::IGNITION;
         return false;
 
     case State::IGNITION:
+    // Later this state will command ignition output channel.    
         state = State::BOOST;
         return false;
 
     case State::BOOST:
+    /*
+        Stay in BOOST until burn time is complete.
+
+        Physics thrust will be added later in SIM_Plane.cpp.
+        For now this is only timing logic.
+    */    
         if (elapsed_s() >= burn_time.get()) {
             state = State::BURNOUT;
         }
         return false;
 
     case State::BURNOUT:
+        /*
+          Booster burn is complete.
+
+          After this, the main engine / normal takeoff should continue,
+          but RATO release should wait until altitude/distance/speed envelope.
+        */
         state = State::ENGINE_TAKEOVER;
         return false;
 
     case State::ENGINE_TAKEOVER:
+        /*
+          Wait here until the measured release envelope is achieved:
+
+              distance >= RATO_REL_DST
+              altitude >= RATO_REL_ALT
+              speed    >= RATO_REL_SPD
+        */
         state = State::EJECT;
         return false;
 
     case State::EJECT:
+        /*
+          Later this state will command the ejection channel.
+          For now, just mark the RATO sequence complete.
+        */
         state = State::COMPLETE;
         return true;
 
     case State::COMPLETE:
+    // RATO is complete; mission TAKEOFF may complete.
+    return true;
+
     case State::ABORT:
+    // RATO aborted; caller may fall back to normal takeoff.
+    return true;    
+    
     default:
         return true;
     }
 }
 
+bool RATOController::release_envelope_met() const
+{
+    /*
+      Release/ejection envelope.
+
+      These are measured values passed from Plane::verify_takeoff().
+      Do not assume the aircraft reached these values from physics;
+      always verify with EKF/GPS/airspeed-derived measurements.
+    */
+    return last_dist_m >= rel_dist.get() &&
+           last_alt_gain_m >= rel_alt.get() &&
+           last_speed_mps >= rel_spd.get();
+}
+
+
 bool RATOController::is_active() const
 {
+    // Active means RATO is in progress and TAKEOFF should not complete yet.
     return state != State::DISABLED &&
            state != State::COMPLETE &&
            state != State::ABORT;
@@ -230,4 +307,5 @@ const char *RATOController::state_name() const
     case State::ABORT:           return "ABORT";
     default:                     return "UNKNOWN";
     }
+    
 }

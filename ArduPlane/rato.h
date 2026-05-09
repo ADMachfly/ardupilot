@@ -1,12 +1,44 @@
+/*
+ * RATO.h  –  Rocket-Assisted Take-Off manager for ArduPlane
+ *
+ * Designed for the SR-75 UAV:
+ *   Airframe mass : 80 kg
+ *   RATO booster  : 10 kg  /  5800 N  /  3 s burn
+ *   Target release: 600 m ground-track, 160 m AGL, 180+ m/s
+ *
+ * Integration points (minimal changes to existing files):
+ *   Parameters.h / Parameters.cpp  – declare g2.rato (AP_SUBGROUPINFO)
+ *   Plane.h                         – add  RATO rato;
+ *   takeoff.cpp  verify_takeoff()   – call  rato.update() and check
+ *                                           rato.is_complete()
+ *   commands_logic.cpp do_takeoff() – call  rato.init()
+ *   SIM_Plane.cpp  update()         – call  rato_physics.update(accel_body, mass, dt)
+ *                                     (see RATOPhysics helper at bottom)
+ */
+
 #pragma once
 
 #include <AP_Common/AP_Common.h>
 #include <AP_Param/AP_Param.h>
+#include <AP_Common/Location.h>
 
 class RATOController {
 public:
     static const struct AP_Param::GroupInfo var_info[];
-    
+
+//    RATO state machine
+//    DISABLED        : RATO not active
+    /*
+      READY           : TAKEOFF command started and RATO is ready
+      IGNITION        : ignition command phase
+      BOOST           : booster burn phase
+      BURNOUT         : booster burn time completed
+      ENGINE_TAKEOVER : main engine / normal takeoff continues
+      EJECT           : release/ejection condition satisfied
+      COMPLETE        : RATO takeoff complete; mission can advance
+      ABORT           : timeout/failure condition──────────────────────────────────────────────────────────────────────────────   
+    */
+
         enum class State : uint8_t {
         DISABLED = 0,
         READY,
@@ -21,9 +53,10 @@ public:
 
     RATOController();
 
+    // Reset controller back to disabled state.
     void reset();
-    void init();
-    bool update();
+    void init(const Location& launch_loc, float launch_alt_m);
+    bool update(float dist_m, float alt_gain_m, float speed_mps);
 
     bool is_active() const;
     bool is_complete() const;
@@ -32,7 +65,8 @@ public:
     State get_state() const { return state; }
     const char *state_name() const;
     
-    // Parameters
+    // ── Parameters exposed to Mission Planner / MAVProxy ─────────────────────
+
     AP_Int8     enable;             // RATO_ENABLE   0=off 1=on
     AP_Float    thrust_n;           // RATO_THR_N    booster thrust [N]
     AP_Float    mass_kg;            // RATO_MASS_KG  booster mass [kg]
@@ -47,9 +81,24 @@ public:
     AP_Int8     ign_chan;           // RATO_IGN_CH   relay/servo channel for ignition (1-based)
     AP_Int8     eject_chan;         // RATO_EJECT_CH relay/servo channel for ejection (1-based)
 
+    // ── Public API ────────────────────────────────────────────────────────────
+
 private:
     State state;
     uint32_t start_ms;
 
-    float elapsed_s() const;    
+    // Stored launch reference values.
+    Location launch_location;
+    float launch_alt_m;
+
+    // Last measured values passed from Plane::verify_takeoff().
+    float last_dist_m;
+    float last_alt_gain_m;
+    float last_speed_mps;
+
+    // Seconds since RATO initialisation.
+    float elapsed_s() const; 
+    
+    // Returns true when altitude + distance + speed release envelope is satisfied.
+    bool release_envelope_met() const;
 };
