@@ -514,6 +514,33 @@ const AP_Param::GroupInfo SIM::var_info2[] = {
     // @Description: Amplitude scaling of motor noise relative to gyro/accel noise
     AP_GROUPINFO("VIB_MOT_MULT", 63, SIM,  vibe_motor_scale, 1.0f),
 
+    // @Param: RATO_THR_N
+    // @DisplayName: SIM RATO thrust
+    // @Description: Simulated SR-75 RATO booster thrust in Newtons
+    // @Units: N
+    // @User: Advanced
+    AP_GROUPINFO("RATO_THR_N", 64, SIM, rato_thrust_n, 5800),
+
+    // @Param: RATO_MASS
+    // @DisplayName: SIM RATO mass
+    // @Description: Simulated SR-75 RATO booster mass while attached
+    // @Units: kg
+    // @User: Advanced
+    AP_GROUPINFO("RATO_MASS", 65, SIM, rato_mass_kg, 10),
+
+    // @Param: RATO_BURN_S
+    // @DisplayName: SIM RATO burn time
+    // @Description: Simulated SR-75 RATO booster burn duration
+    // @Units: s
+    // @User: Advanced
+    AP_GROUPINFO("RATO_BURN_S", 66, SIM, rato_burn_s, 3.0f),
+
+    // @Param: RATO_PITCH
+    // @DisplayName: SIM RATO pitch
+    // @Description: Simulated SR-75 RATO thrust pitch angle above body X axis
+    // @Units: deg
+    // @User: Advanced
+    AP_GROUPINFO("RATO_PITCH", 67, SIM, rato_pitch_deg, 20.0f),
 
     AP_GROUPEND
 

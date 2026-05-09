@@ -215,6 +215,12 @@ public:
     AP_Float engine_mul;  // engine multiplier
     AP_Int32 engine_fail; // mask of engine/motor servo outputs to fail
 
+    // RATO simulation parameters
+    AP_Float rato_thrust_n;
+    AP_Float rato_mass_kg;
+    AP_Float rato_burn_s;
+    AP_Float rato_pitch_deg;
+
     // initial offset on GPS lat/lon, used to shift origin
     AP_Float gps_init_lat_ofs;
     AP_Float gps_init_lon_ofs;
