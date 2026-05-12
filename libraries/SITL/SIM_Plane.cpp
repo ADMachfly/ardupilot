@@ -59,10 +59,14 @@ Plane::Plane(const char *frame_str) :
         thrust_scale = (mass * GRAVITY_MSS) / hover_throttle;
     }
     if (strstr(frame_str, "-sr75")) {
-        // SR-75 jet powered UAV - 82.5kg, 800N thrust, 125 m/s max
-        mass = 82.5;
-        thrust_scale = 800.0 / hover_throttle;
-        coefficient.c_drag_p = 0.025;
+        // SR-75 Jet Powered UAV
+        // Mass: 89.18 kg (takeoff) / 80 kg (dry)
+        // Wing area: 1.36 m², Chord: 0.91 m
+        // RATO: 5800N for 3s, Turbojet: 800N cruise
+        // Aero: CL0=0.0221, CLa=2.308, CD0=0.00798, K=0.145
+        mass = 80;
+        thrust_scale = (mass * GRAVITY_MSS) / hover_throttle;;
+        coefficient.c_drag_p = 0.00798;
     }
     if (strstr(frame_str, "-revthrust")) {
         reverse_thrust = true;
@@ -489,85 +493,64 @@ void Plane::calculate_forces(const struct sitl_input &input, Vector3f &rot_accel
             launch_start_ms = 0;
         }
     }
-    
+// scale thrust to newtons
+thrust *= thrust_scale;
+
+// total force in body frame
+Vector3f total_force = Vector3f(thrust, 0, 0) + force;
+
+// temporary RATO test logic
+static bool rato_attached = true;
+static bool rato_active = false;
+static uint32_t rato_start_ms = 0;
+
+const float rato_thrust_N = 5800.0f;
+const float rato_mass_kg = 10.0f;
+const float rato_burn_s = 3.0f;
+const float rato_pitch_deg = 20.0f;
+
+// Example trigger: throttle high and aircraft near ground
+if (!rato_active && rato_attached && thrust > 0.9f * thrust_scale && position.z > -2.0f) {
+    rato_active = true;
+    rato_start_ms = AP_HAL::millis();
+}
+
+if (rato_active) {
+    const float rato_time_s = (AP_HAL::millis() - rato_start_ms) * 0.001f;
+
+    if (rato_time_s <= rato_burn_s) {
+        const float rato_pitch_rad = radians(rato_pitch_deg);
+
+        total_force.x += rato_thrust_N * cosf(rato_pitch_rad);
+        total_force.z += rato_thrust_N * sinf(rato_pitch_rad);
+    } else {
+        rato_active = false;
+        rato_attached = false;
+    }
+}
+
+float effective_mass = mass;
+if (rato_attached) {
+    effective_mass += rato_mass_kg;
+}
+
+accel_body = total_force;
+accel_body /= effective_mass;
+
+// add some noise
+if (thrust_scale > 0) {
+    add_noise(fabsf(thrust) / thrust_scale);
+}
+
     // simulate engine RPM
     motor_mask |= (1U<<2);
     rpm[2] = thrust * 7000;
     
-// scale normal engine thrust to Newtons
-thrust *= thrust_scale;
+    // scale thrust to newtons
+    thrust *= thrust_scale;
 
-// Total force in body frame before mass division.
-// Existing model already has:
-//   thrust = engine force along body X
-//   force  = aerodynamic/launch forces
-Vector3f total_force = Vector3f(thrust, 0, 0) + force;
-
-// -----------------------------------------------------------------------------
-// SR-75 temporary RATO SITL physics model
-//
-// This is a simulation-only booster force model.
-// It does not yet read RATO_ENABLE from ArduPlane parameters.
-// It is intentionally temporary for Step 6.
-//
-// Current model:
-//   RATO thrust = 5800 N
-//   RATO mass   = 10 kg
-//   burn time   = 3 seconds
-//   pitch angle = 20 deg
-//
-// During burn:
-//   total aircraft mass = aircraft mass + RATO mass
-//   force is added in body X/Z direction
-//
-// After burn:
-//   RATO thrust becomes zero
-//   booster mass is still attached in this step
-//   ejection/mass drop will be added in the next step
-// -----------------------------------------------------------------------------
-
-static bool sr75_rato_started = false;
-static bool sr75_rato_burning = false;
-static uint32_t sr75_rato_start_ms = 0;
-
-const float sr75_rato_thrust_N = 5800.0f;
-const float sr75_rato_mass_kg = 10.0f;
-const float sr75_rato_burn_s = 3.0f;
-const float sr75_rato_pitch_deg = 20.0f;
-
-// Start RATO automatically when throttle is high and aircraft is near ground.
-// This is temporary until we connect the autopilot RATO state to SITL.
-if (!sr75_rato_started && thrust > 0.9f * thrust_scale && position.z > -2.0f) {
-    sr75_rato_started = true;
-    sr75_rato_burning = true;
-    sr75_rato_start_ms = AP_HAL::millis();
-}
-
-float effective_mass = mass;
-
-// Booster mass is attached once RATO has started.
-// In this step, we keep it attached after burnout.
-// Ejection/mass drop comes later.
-if (sr75_rato_started) {
-    effective_mass += sr75_rato_mass_kg;
-}
-
-if (sr75_rato_burning) {
-    const float rato_time_s = (AP_HAL::millis() - sr75_rato_start_ms) * 0.001f;
-
-    if (rato_time_s <= sr75_rato_burn_s) {
-        const float rato_pitch_rad = radians(sr75_rato_pitch_deg);
-
-        total_force.x += sr75_rato_thrust_N * cosf(rato_pitch_rad);
-        total_force.z += sr75_rato_thrust_N * sinf(rato_pitch_rad);
-    } else {
-        sr75_rato_burning = false;
-    }
-}
-
-// Convert total body-frame force to body-frame acceleration.
-accel_body = total_force;
-accel_body /= effective_mass;
+    accel_body = Vector3f(thrust, 0, 0) + force;
+    accel_body /= mass;
 
     // add some noise
     if (thrust_scale > 0) {

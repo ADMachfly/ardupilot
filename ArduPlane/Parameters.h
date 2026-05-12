@@ -486,7 +486,7 @@ public:
 
     // just to make compilation easier when all things are compiled out...
     
-    RATOController rato;
+    RATO rato;
 
     uint8_t unused_integer;
 

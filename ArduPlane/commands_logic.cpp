@@ -605,7 +605,7 @@ bool Plane::verify_takeoff()
         GCS_SEND_TEXT(MAV_SEVERITY_INFO,
                   "RATO DBG: verify enable=%d active=%d",
                   (int)g2.rato.enable.get(),
-                  (int)g2.rato.is_active());
+                  (int)g2.rato.state());
                   
     if (g2.rato.enable.get() > 0 && g2.rato.is_active()) {
         Location now_loc;
