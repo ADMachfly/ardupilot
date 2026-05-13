@@ -1072,15 +1072,17 @@ protected:
     bool _enter() override;
 };
 
+#endif // HAL SOARING ENABLED
+
 class ModeSR75VLand : public Mode
 {
 public:
+    Number mode_number() const override { return Number::SR75_VLAND; }
     ModeSR75VLand();
 
-    Number mode_number() const override
-    {
-        return Number::SR75_VLAND;
-    }
+    bool _enter() override;
+    void update() override;
+    void run() override;
 
     const char *name() const override
     {
@@ -1089,15 +1091,27 @@ public:
 
     const char *name4() const override
     {
-        return "VLD";
+        return "VLND";
     }
 
-protected:
-    bool _enter() override;
-    void update() override;
-
 private:
-    uint32_t last_status_ms;
-};
+    enum class VLandStage : uint8_t {
+        DESCENT = 0,
+        RECOVERY_GATE,
+        COBRA_ENTRY,
+        PITCH_TO_VERTICAL,
+        VERTICAL_STABILIZE,
+        LEG_DEPLOY,
+        PRECISION_DESCENT,
+        TOUCHDOWN,
+        ABORT
+    };
 
-#endif
+    VLandStage stage;
+    uint32_t stage_start_ms;
+    uint32_t last_status_ms;
+
+    void set_stage(VLandStage new_stage);
+    void update_stage();
+    const char* stage_name(VLandStage s) const;
+};
