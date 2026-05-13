@@ -43,6 +43,9 @@ Mode *Plane::mode_from_mode_num(const enum Mode::Number num)
     case Mode::Number::LOITER:
         ret = &mode_loiter;
         break;
+    case Mode::Number::SR75_VLAND:
+        ret = &mode_sr75_vland;
+        break;    
     case Mode::Number::AVOID_ADSB:
 #if HAL_ADSB_ENABLED
         ret = &mode_avoidADSB;

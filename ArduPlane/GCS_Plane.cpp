@@ -65,6 +65,7 @@ void GCS_Plane::update_vehicle_sensor_status_flags(void)
     case Mode::Number::GUIDED:
     case Mode::Number::CIRCLE:
     case Mode::Number::TAKEOFF:
+    case Mode::Number::SR75_VLAND:
 #if MODE_AUTOLAND_ENABLED
     case Mode::Number::AUTOLAND:
 #endif

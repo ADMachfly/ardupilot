@@ -70,7 +70,7 @@ public:
 #if MODE_AUTOLAND_ENABLED
         AUTOLAND      = 26,
 #endif
-
+    SR75_VLAND = 27,
     // Mode number 30 reserved for "offboard" for external/lua control.
     };
 
@@ -1070,6 +1070,34 @@ protected:
     void restore_mode(const char *reason, ModeReason modereason);
 
     bool _enter() override;
+};
+
+class ModeSR75VLand : public Mode
+{
+public:
+    ModeSR75VLand();
+
+    Number mode_number() const override
+    {
+        return Number::SR75_VLAND;
+    }
+
+    const char *name() const override
+    {
+        return "SR75_VLAND";
+    }
+
+    const char *name4() const override
+    {
+        return "VLD";
+    }
+
+protected:
+    bool _enter() override;
+    void update() override;
+
+private:
+    uint32_t last_status_ms;
 };
 
 #endif

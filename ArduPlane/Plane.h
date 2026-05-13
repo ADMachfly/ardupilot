@@ -95,6 +95,7 @@
 
 #include "GCS_MAVLink_Plane.h"
 #include "GCS_Plane.h"
+#include "rato.h"
 #include "quadplane.h"
 #include <AP_Tuning/AP_Tuning_config.h>
 #if AP_TUNING_ENABLED
@@ -174,6 +175,7 @@ public:
     friend class ModeTakeoff;
     friend class ModeThermal;
     friend class ModeLoiterAltQLand;
+    friend class ModeSR75VLand;   // ← ADD THIS
 #if MODE_AUTOLAND_ENABLED
     friend class ModeAutoLand;
 #endif
@@ -306,6 +308,10 @@ private:
     ModeAuto mode_auto;
     ModeRTL mode_rtl;
     ModeLoiter mode_loiter;
+
+    // SR-75 custom vertical landing mode
+    ModeSR75VLand mode_sr75_vland;
+
 #if HAL_ADSB_ENABLED
     ModeAvoidADSB mode_avoidADSB;
 #endif
@@ -835,7 +841,10 @@ private:
 #if HAL_QUADPLANE_ENABLED
     // support for quadcopter-plane
     QuadPlane quadplane{ahrs};
+    
 #endif
+
+    RATOController rato_controller;
 
 #if AP_TUNING_ENABLED
     // support for transmitter tuning
