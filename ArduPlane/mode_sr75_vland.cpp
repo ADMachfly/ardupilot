@@ -26,14 +26,55 @@ void ModeSR75VLand::run()
 
 void ModeSR75VLand::update()
 {
-    update_stage();
+    const float alt_m = get_relative_alt_m();
+    const float gs_ms = get_groundspeed_ms();
 
-    // Phase 2 only: skeleton heartbeat
-    const uint32_t now = AP_HAL::millis();
-    if (now - last_status_ms > 1000) {
-        last_status_ms = now;
-        gcs().send_text(MAV_SEVERITY_INFO, "SR75 VLAND: %s", stage_name(stage));
+    switch (stage) {
+    case VLandStage::DESCENT:
+        if (alt_m <= 1000.0f) {
+            set_stage(VLandStage::RECOVERY_GATE);
+        }
+        break;
 
+    case VLandStage::RECOVERY_GATE:
+        if (alt_m <= 700.0f && gs_ms <= 45.0f) {
+            set_stage(VLandStage::COBRA_ENTRY);
+        }
+        break;
+
+    case VLandStage::COBRA_ENTRY:
+        if (alt_m <= 500.0f) {
+            set_stage(VLandStage::PITCH_TO_VERTICAL);
+        }
+        break;
+
+    case VLandStage::PITCH_TO_VERTICAL:
+        if (alt_m <= 300.0f) {
+            set_stage(VLandStage::VERTICAL_STABILIZE);
+        }
+        break;
+
+    case VLandStage::VERTICAL_STABILIZE:
+        if (alt_m <= 250.0f) {
+            set_stage(VLandStage::LEG_DEPLOY);
+        }
+        break;
+
+    case VLandStage::LEG_DEPLOY:
+        if (alt_m <= 200.0f) {
+            set_stage(VLandStage::PRECISION_DESCENT);
+        }
+        break;
+
+    case VLandStage::PRECISION_DESCENT:
+        if (alt_m <= 2.0f) {
+            set_stage(VLandStage::TOUCHDOWN);
+        }
+        break;
+
+    case VLandStage::TOUCHDOWN:
+    case VLandStage::ABORT:
+        break;
     }
 }
 
@@ -46,7 +87,11 @@ void ModeSR75VLand::set_stage(const VLandStage new_stage)
     stage = new_stage;
     stage_start_ms = AP_HAL::millis();
 
-    gcs().send_text(MAV_SEVERITY_INFO, "SR75 VLAND stage: %s", stage_name(stage));
+    gcs().send_text(MAV_SEVERITY_INFO,
+                "SR75 VLAND: %s alt=%.1f gs=%.1f",
+                stage_name(stage),
+                get_relative_alt_m(),
+                get_groundspeed_ms());
 }
 
 const char* ModeSR75VLand::stage_name(const VLandStage s) const
@@ -128,4 +173,25 @@ void ModeSR75VLand::update_stage()
     case VLandStage::ABORT:
         break;
     }
+}
+
+
+float ModeSR75VLand::get_relative_alt_m() const
+{
+    Location current_loc;
+    if (!plane.ahrs.get_location(current_loc)) {
+        return 0.0f;
+    }
+
+    return current_loc.alt * 0.01f;
+}
+
+float ModeSR75VLand::get_groundspeed_ms() const
+{
+    return plane.ahrs.groundspeed();
+}
+
+bool ModeSR75VLand::reached_altitude_below(const float alt_m) const
+{
+    return get_relative_alt_m() <= alt_m;
 }

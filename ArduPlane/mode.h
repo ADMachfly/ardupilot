@@ -1114,4 +1114,8 @@ private:
     void set_stage(VLandStage new_stage);
     void update_stage();
     const char* stage_name(VLandStage s) const;
+
+    float get_relative_alt_m() const;
+    float get_groundspeed_ms() const;
+    bool reached_altitude_below(float alt_m) const;
 };
