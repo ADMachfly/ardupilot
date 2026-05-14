@@ -1083,9 +1083,10 @@ public:
     bool _enter() override;
     void update() override;
     void run() override;
-    bool start_from_mission_target(const Location &loc);
+    
     void set_touchdown_target(const Location &loc);
-
+    bool start_from_mission_target(const Location &loc);
+    
     const char *name() const override
     {
         return "SR75_VLAND";
