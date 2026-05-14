@@ -1118,4 +1118,16 @@ private:
     float get_relative_alt_m() const;
     float get_groundspeed_ms() const;
     bool reached_altitude_below(float alt_m) const;
+
+    Location touchdown_loc;
+    bool touchdown_set;
+
+    float recovery_distance_m;
+    float terminal_alt_m;
+    float cobra_alt_m;
+    float vertical_stabilize_alt_m;
+    float commit_alt_m;
+
+    void init_default_target();
+    void calculate_recovery_geometry();
 };
