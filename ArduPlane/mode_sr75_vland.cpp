@@ -20,8 +20,14 @@ bool ModeSR75VLand::_enter()
 {
     gcs().send_text(MAV_SEVERITY_INFO, "SR75 VLAND: entered");
 
+if (!touchdown_set) {
     init_default_target();
-    calculate_recovery_geometry();
+} else {
+    gcs().send_text(MAV_SEVERITY_INFO,
+                    "SR75 VLAND: using stored touchdown target");
+}
+
+calculate_recovery_geometry();
 
     stage = VLandStage::DESCENT;
     stage_start_ms = AP_HAL::millis();
@@ -198,4 +204,26 @@ void ModeSR75VLand::calculate_recovery_geometry()
                     recovery_distance_m,
                     terminal_alt_m,
                     cobra_alt_m);
+}
+
+void ModeSR75VLand::set_touchdown_target(const Location &loc)
+{
+    touchdown_loc = loc;
+    touchdown_set = true;
+
+    gcs().send_text(MAV_SEVERITY_INFO,
+                    "SR75 VLAND target set: lat=%ld lon=%ld alt=%.1fm",
+                    (long)touchdown_loc.lat,
+                    (long)touchdown_loc.lng,
+                    touchdown_loc.alt * 0.01f);
+}
+
+bool ModeSR75VLand::start_from_mission_target(const Location &loc)
+{
+    set_touchdown_target(loc);
+
+    gcs().send_text(MAV_SEVERITY_INFO,
+                    "SR75 VLAND mission trigger");
+
+    return true;
 }

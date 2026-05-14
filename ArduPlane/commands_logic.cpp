@@ -5,6 +5,7 @@
 /********************************************************************************/
 bool Plane::start_command(const AP_Mission::Mission_Command& cmd)
 {
+
     // default to non-VTOL loiter
     auto_state.vtol_loiter = false;
 
@@ -56,15 +57,44 @@ bool Plane::start_command(const AP_Mission::Mission_Command& cmd)
         do_nav_wp(cmd);
         break;
 
-    case MAV_CMD_NAV_LAND:              // LAND to Waypoint
+case MAV_CMD_NAV_LAND: {            // TEMP PHASE 8: SR75 VLAND trigger using LAND Param1=75
+    if (cmd.p1 == 75) {
+        Location target_loc = cmd.content.location;
+
+        mode_sr75_vland.start_from_mission_target(target_loc);
+
+        gcs().send_text(MAV_SEVERITY_INFO,
+                        "SR75 VLAND mission trigger via NAV_LAND P1=75");
+
+        set_mode(mode_sr75_vland, ModeReason::MISSION_CMD);
+
+        return true;
+    }
+
 #if HAL_QUADPLANE_ENABLED
-        if (quadplane.is_vtol_land(cmd.id)) {
-            crash_state.is_crashed = false;
-            return quadplane.do_vtol_land(cmd);            
-        }
+    if (quadplane.is_vtol_land(cmd.id)) {
+        crash_state.is_crashed = false;
+        return quadplane.do_vtol_land(cmd);
+    }
 #endif
+
+    do_land(cmd);
+    break;
+}
+
+/* #if HAL_QUADPLANE_ENABLED
+    if (quadplane.is_vtol_land(cmd.id)) {
+        crash_state.is_crashed = false;
+        return quadplane.do_vtol_land(cmd);
+    }
+#endif 
+
+    do_land(cmd);
+    break;
+}
+
         do_land(cmd);
-        break;
+        break; */
 
     case MAV_CMD_NAV_LOITER_UNLIM:              // Loiter indefinitely
         do_loiter_unlimited(cmd);
@@ -233,12 +263,26 @@ bool Plane::verify_command(const AP_Mission::Mission_Command& cmd)        // Ret
     case MAV_CMD_NAV_WAYPOINT:
         return verify_nav_wp(cmd);
 
-    case MAV_CMD_NAV_LAND:
+   /* case MAV_CMD_NAV_LAND:
 #if HAL_QUADPLANE_ENABLED
         if (quadplane.is_vtol_land(cmd.id)) {
             return quadplane.verify_vtol_land();
         }
-#endif
+#endif */
+
+case MAV_CMD_NAV_LAND: {            // TEMP PHASE 7: SR75 VLAND trigger using LAND command
+    Location target_loc = cmd.content.location;
+
+    mode_sr75_vland.set_touchdown_target(target_loc);
+
+    gcs().send_text(MAV_SEVERITY_INFO,
+                    "SR75 VLAND mission trigger via NAV_LAND");
+
+    set_mode(mode_sr75_vland, ModeReason::MISSION_CMD);
+
+    return true;
+}
+
         if (flight_stage == AP_FixedWing::FlightStage::ABORT_LANDING) {
             return landing.verify_abort_landing(prev_WP_loc, next_WP_loc, current_loc, auto_state.takeoff_altitude_rel_cm, throttle_suppressed);
 
