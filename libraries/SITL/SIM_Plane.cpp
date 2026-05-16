@@ -61,8 +61,11 @@ Plane::Plane(const char *frame_str) :
     if (strstr(frame_str, "-sr75")) {
         // SR-75 jet powered UAV - 82.5kg, 800N thrust, 125 m/s max
         mass = 82.5;
-        thrust_scale = 800.0 / hover_throttle;
-        coefficient.c_drag_p = 0.025;
+        thrust_scale = 800.0f;
+
+        coefficient.c_drag_p = 0.04;
+        coefficient.c_drag_deltae = 0.08;
+        coefficient.c_m_deltae = 1.2;
     }
     if (strstr(frame_str, "-revthrust")) {
         reverse_thrust = true;
@@ -127,20 +130,19 @@ void Plane::load_coeffs(const char *model_json)
 {
     char *fname = nullptr;
     struct stat st;
+
     if (AP::FS().stat(model_json, &st) == 0) {
         fname = strdup(model_json);
     } else {
         IGNORE_RETURN(asprintf(&fname, "@ROMFS/models/%s", model_json));
-        if (AP::FS().stat(model_json, &st) != 0) {
+        if (fname == nullptr || AP::FS().stat(fname, &st) != 0) {
             AP_HAL::panic("%s failed to load", model_json);
         }
     }
-    if (fname == nullptr) {
-        AP_HAL::panic("%s failed to load", model_json);
-    }
-    AP_JSON::value *obj = AP_JSON::load_json(model_json);
+
+    AP_JSON::value *obj = AP_JSON::load_json(fname);
     if (obj == nullptr) {
-        AP_HAL::panic("%s failed to load", model_json);
+        AP_HAL::panic("%s failed to load", fname);
     }
 
     enum class VarType {
@@ -526,29 +528,29 @@ Vector3f total_force = Vector3f(thrust, 0, 0) + force;
 //   ejection/mass drop will be added in the next step
 // -----------------------------------------------------------------------------
 
-static bool sr75_rato_started = false;
-static bool sr75_rato_burning = false;
+static bool sr75_rato_started  = false;
+static bool sr75_rato_burning  = false;
+static bool sr75_rato_attached = false;
 static uint32_t sr75_rato_start_ms = 0;
 
-const float sr75_rato_thrust_N = 5800.0f;
-const float sr75_rato_mass_kg = 10.0f;
-const float sr75_rato_burn_s = 3.0f;
+const float sr75_rato_thrust_N  = 5800.0f;
+const float sr75_rato_mass_kg   = 10.0f;
+const float sr75_rato_burn_s    = 3.0f;
 const float sr75_rato_pitch_deg = 20.0f;
 
-// Start RATO automatically when throttle is high and aircraft is near ground.
-// This is temporary until we connect the autopilot RATO state to SITL.
+// TEMP SITL-only autostart.
+// Later connect this to ArduPlane RATOController state.
 if (!sr75_rato_started && thrust > 0.9f * thrust_scale && position.z > -2.0f) {
-    sr75_rato_started = true;
-    sr75_rato_burning = true;
+    sr75_rato_started  = true;
+    sr75_rato_burning  = true;
+    sr75_rato_attached = true;
     sr75_rato_start_ms = AP_HAL::millis();
 }
 
 float effective_mass = mass;
 
-// Booster mass is attached once RATO has started.
-// In this step, we keep it attached after burnout.
-// Ejection/mass drop comes later.
-if (sr75_rato_started) {
+// Booster mass applies only while booster is attached.
+if (sr75_rato_attached) {
     effective_mass += sr75_rato_mass_kg;
 }
 
@@ -559,12 +561,12 @@ if (sr75_rato_burning) {
         const float rato_pitch_rad = radians(sr75_rato_pitch_deg);
 
         total_force.x += sr75_rato_thrust_N * cosf(rato_pitch_rad);
-        total_force.z += sr75_rato_thrust_N * sinf(rato_pitch_rad);
+        total_force.z -= sr75_rato_thrust_N * sinf(rato_pitch_rad);
     } else {
-        sr75_rato_burning = false;
+        sr75_rato_burning  = false;
+        sr75_rato_attached = false;  // eject booster at burnout
     }
 }
-
 // Convert total body-frame force to body-frame acceleration.
 accel_body = total_force;
 accel_body /= effective_mass;

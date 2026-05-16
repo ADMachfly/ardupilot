@@ -396,8 +396,6 @@ void Plane::do_takeoff(const AP_Mission::Mission_Command& cmd)
     steer_state.hold_course_cd = -1;
     auto_state.baro_takeoff_alt = barometer.get_altitude();
 
-    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RATO DBG: do_takeoff enable=%d", (int)g2.rato.enable.get());
-
     // SR-75 RATO: initialise state machine on TAKEOFF command.
     //
     // This does not apply RATO physics.
@@ -602,11 +600,6 @@ bool Plane::verify_takeoff()
     // It returns false while RATO sequence is still active.
     // It returns true when RATO sequence is complete/aborted.
 
-        GCS_SEND_TEXT(MAV_SEVERITY_INFO,
-                  "RATO DBG: verify enable=%d active=%d",
-                  (int)g2.rato.enable.get(),
-                  (int)g2.rato.is_active());
-                  
     if (g2.rato.enable.get() > 0 && g2.rato.is_active()) {
         Location now_loc;
         float dist_m = 0.0f;
@@ -636,6 +629,9 @@ bool Plane::verify_takeoff()
             GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "RATO: aborted, falling back to normal takeoff");
             // Fall through to normal ArduPlane takeoff verification below.
         } else {
+            if (rato_done) {
+                GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RATO: complete");
+            }
             // While RATO is active, prevent normal TAKEOFF from completing.
             // Once RATO completes, this returns true and mission advances.
             return rato_done;
