@@ -25,6 +25,19 @@
 
 using namespace SITL;
 
+// ---------------------------------------------------------------------------
+// SR-75 fuel state (file-scope, SITL-only)
+// ---------------------------------------------------------------------------
+static constexpr float SR75_FUEL_CAPACITY_ML = 30000.0f;  // 30 L
+static constexpr float SR75_IDLE_THRUST_N    = 30.0f;
+static constexpr float SR75_MAX_THRUST_N     = 800.0f;
+static constexpr float SR75_IDLE_FLOW_ML_MIN = 200.0f;
+static constexpr float SR75_MAX_FLOW_ML_MIN  = 1392.0f;
+
+static float sr75_fuel_ml         = SR75_FUEL_CAPACITY_ML;
+static float sr75_fuel_flow_mlmin = 0.0f;
+static bool  sr75_fuel_empty      = false;
+
 Plane::Plane(const char *frame_str) :
     Aircraft(frame_str)
 {
@@ -62,6 +75,7 @@ Plane::Plane(const char *frame_str) :
         // SR-75 jet powered UAV - 82.5kg, 800N thrust, 125 m/s max
         mass = 82.5;
         thrust_scale = 800.0f;
+        is_sr75 = true;
 
         coefficient.c_drag_p = 0.04;
         coefficient.c_drag_deltae = 0.08;
@@ -270,11 +284,57 @@ float Plane::dragCoeff(float alpha) const
     const float c_lift_0 = coefficient.c_lift_0;
     const float c_lift_a0 = coefficient.c_lift_a;
     const float oswald = coefficient.oswald;
-    
-	double AR = pow(b,2)/s;
-	double c_drag_a = c_drag_p + pow(c_lift_0+c_lift_a0*alpha,2)/(M_PI*oswald*AR);
 
-	return c_drag_a;
+    const double AR = pow(b, 2) / s;
+    const double cl = c_lift_0 + c_lift_a0 * alpha;
+
+    double effective_cd_p = c_drag_p;
+    double induced_denom  = M_PI * oswald * AR;
+    double wave_drag      = 0.0;
+
+    if (is_sr75 && airspeed > 10.0f) {
+        // ---------------------------------------------------------------
+        // 1. Reynolds-number correction to parasitic drag (CD_p)
+        //
+        // Turbulent skin friction: Cf ∝ Re^(-0.2)
+        // Re = ρ·V·c / μ,  with μ ∝ ρ^0.176 (Sutherland, ISA troposphere)
+        // Combined ratio from any (ρ,V) to the reference (ρ₀=1.225, V₀=69):
+        //   CD_p_factor = (ρ₀/ρ)^0.165 × (V₀/V)^0.2
+        //
+        // Effect:
+        //   +5000 m, same TAS  → factor ≈ 1.087  (+8.7% parasitic drag)
+        //   SL,      125 m/s   → factor ≈ 0.884  (-11.6% parasitic drag)
+        //   +5000 m, 125 m/s   → factor ≈ 0.960  (near neutral — Re effects cancel)
+        // ---------------------------------------------------------------
+        const float re_factor = powf(1.225f / air_density, 0.1648f) *
+                                powf(69.0f  / airspeed,    0.2f);
+        effective_cd_p = c_drag_p * (double)re_factor;
+
+        // ---------------------------------------------------------------
+        // 2. Mach-number corrections
+        //
+        // Speed of sound corrected for altitude (ISA troposphere):
+        //   a = a₀ × (ρ/ρ₀)^0.1175
+        // ---------------------------------------------------------------
+        const float sos  = 340.3f * powf(air_density / 1.225f, 0.1175f);
+        const float mach = airspeed / sos;
+        const float m2   = mach * mach;
+
+        if (m2 < 0.98f) {
+            // Prandtl-Glauert: induced drag rises by 1/(1-M²) at same alpha.
+            // Weight reduction lowers alpha via autopilot trim → lower CL
+            // → less induced drag, captured here automatically.
+            induced_denom *= (1.0 - m2);
+        }
+
+        // Wave drag onset above M=0.5
+        if (mach > 0.5f) {
+            const double dm = mach - 0.5;
+            wave_drag = 0.005 * dm * dm;
+        }
+    }
+
+    return (float)(effective_cd_p + wave_drag + cl * cl / induced_denom);
 }
 
 // Torque calculation function
@@ -499,6 +559,60 @@ void Plane::calculate_forces(const struct sitl_input &input, Vector3f &rot_accel
 // scale normal engine thrust to Newtons
 thrust *= thrust_scale;
 
+// ---------------------------------------------------------------------------
+// SR-75 fuel consumption model
+// ---------------------------------------------------------------------------
+if (is_sr75) {
+    static uint32_t sr75_fuel_last_ms = 0;
+    const uint32_t now_ms = AP_HAL::millis();
+
+    if (sr75_fuel_last_ms == 0) {
+        sr75_fuel_last_ms = now_ms;
+    }
+
+    const float dt_min = (now_ms - sr75_fuel_last_ms) * (1.0f / 60000.0f);
+    sr75_fuel_last_ms = now_ms;
+
+    if (!sr75_fuel_empty && dt_min > 0.0f) {
+        const float thrust_n = thrust;  // already in Newtons
+        if (thrust_n <= 0.0f) {
+            sr75_fuel_flow_mlmin = 0.0f;
+        } else if (thrust_n < SR75_IDLE_THRUST_N) {
+            sr75_fuel_flow_mlmin = (thrust_n / SR75_IDLE_THRUST_N) * SR75_IDLE_FLOW_ML_MIN;
+        } else {
+            sr75_fuel_flow_mlmin = SR75_IDLE_FLOW_ML_MIN +
+                (thrust_n - SR75_IDLE_THRUST_N) *
+                ((SR75_MAX_FLOW_ML_MIN - SR75_IDLE_FLOW_ML_MIN) /
+                 (SR75_MAX_THRUST_N   - SR75_IDLE_THRUST_N));
+        }
+
+        sr75_fuel_ml -= sr75_fuel_flow_mlmin * dt_min;
+        if (sr75_fuel_ml <= 0.0f) {
+            sr75_fuel_ml   = 0.0f;
+            sr75_fuel_empty = true;
+            ::printf("SR75: FUEL EXHAUSTED — engine flameout\n");
+        }
+
+        // Console log every ~10 s
+        static uint32_t sr75_fuel_log_ms = 0;
+        if (now_ms - sr75_fuel_log_ms >= 10000) {
+            sr75_fuel_log_ms = now_ms;
+            const float sos  = 340.3f * powf(air_density / 1.225f, 0.1175f);
+            const float mach = airspeed / sos;
+            const float cd   = dragCoeff(angle_of_attack);
+            ::printf("SR75: fuel=%.0f ml  flow=%.1f ml/min  thr=%.1f N\n"
+                     "      M=%.3f  rho=%.3f kg/m3  CD=%.4f\n",
+                     (double)sr75_fuel_ml, (double)sr75_fuel_flow_mlmin, (double)thrust_n,
+                     (double)mach, (double)air_density, (double)cd);
+        }
+    }
+
+    if (sr75_fuel_empty) {
+        thrust = 0.0f;
+        sr75_fuel_flow_mlmin = 0.0f;
+    }
+}
+
 // Total force in body frame before mass division.
 // Existing model already has:
 //   thrust = engine force along body X
@@ -554,6 +668,13 @@ if (sr75_rato_attached) {
     effective_mass += sr75_rato_mass_kg;
 }
 
+// SR-75: subtract burned fuel mass (30 L full load = 24 kg at 0.8 kg/L).
+// mass=82.5 kg is the full-fuel weight; dry weight is ~58.5 kg.
+if (is_sr75) {
+    const float fuel_burned_kg = (SR75_FUEL_CAPACITY_ML - sr75_fuel_ml) * 0.0008f;
+    effective_mass -= fuel_burned_kg;
+}
+
 if (sr75_rato_burning) {
     const float rato_time_s = (AP_HAL::millis() - sr75_rato_start_ms) * 0.001f;
 
@@ -595,8 +716,16 @@ void Plane::update(const struct sitl_input &input)
     calculate_forces(input, rot_accel);
 
     float throttle = reverse_thrust ? filtered_servo_angle(input, 2) : filtered_servo_range(input, 2);
-    battery_voltage = sitl->batt_voltage - 0.7*throttle;
-    battery_current = (battery_voltage/sitl->batt_voltage)*50.0f*sq(throttle);
+    if (is_sr75) {
+        // Expose SR-75 fuel state via battery telemetry:
+        //   voltage  → fuel level (0–batt_voltage mapped to 0–15 L)
+        //   current  → fuel flow rate in ml/min
+        battery_voltage = sitl->batt_voltage * (sr75_fuel_ml / SR75_FUEL_CAPACITY_ML);
+        battery_current = sr75_fuel_flow_mlmin;
+    } else {
+        battery_voltage = sitl->batt_voltage - 0.7*throttle;
+        battery_current = (battery_voltage/sitl->batt_voltage)*50.0f*sq(throttle);
+    }
 
     update_dynamics(rot_accel);
 
