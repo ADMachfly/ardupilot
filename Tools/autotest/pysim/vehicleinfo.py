@@ -393,6 +393,10 @@ class VehicleInfo(object):
                 "default_params_filename": "default_params/gazebo-zephyr.parm",
                 "external": True,
             },
+            "gazebo-sr75": {
+                "waf_target": "bin/arduplane",
+                "default_params_filename": [ "default_params/gazebo-sr75.parm", "models/sr75.parm",],
+            },
             "last_letter": {
                 "waf_target": "bin/arduplane",
                 "default_params_filename": "models/plane.parm",
