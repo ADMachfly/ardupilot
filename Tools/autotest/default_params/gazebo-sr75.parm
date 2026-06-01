@@ -18,3 +18,26 @@ INS_ACC2SCAL_Z   1.001
 INS_GYR_CAL      0
 ARSPD_TYPE 0
 BATT_MONITOR    4
+
+# ---------------- SR-75 simulated sensors ----------------
+
+# Airspeed sensor simulation
+ARSPD_TYPE 100
+ARSPD_USE 1
+ARSPD_FBW_MIN 40
+ARSPD_FBW_MAX 125
+AIRSPEED_MIN 40
+AIRSPEED_MAX 125
+AIRSPEED_CRUISE 69
+TRIM_ARSPD_CM 6900
+
+# Rangefinder placeholder for landing / VLAND
+RNGFND1_TYPE 0
+RNGFND1_MIN_CM 20
+RNGFND1_MAX_CM 5000
+RNGFND1_ORIENT 25
+RNGFND_LANDING 0
+
+# RPM placeholders for twin turbojet engines
+RPM1_TYPE 0
+RPM2_TYPE 0 
