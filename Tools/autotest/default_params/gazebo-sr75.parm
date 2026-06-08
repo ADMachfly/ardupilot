@@ -40,4 +40,64 @@ RNGFND_LANDING 0
 
 # RPM placeholders for twin turbojet engines
 RPM1_TYPE 0
-RPM2_TYPE 0 
+RPM2_TYPE 0
+
+# ---------------- Gazebo-specific flight control overrides ----------------
+
+# TKOFF_PITCH_CD: Gazebo main wing stall angle is 11.5 deg (alpha_stall=0.20 rad).
+# sr75.parm sets 1500 (15 deg) which is above stall — causes immediate wing stall
+# on pitch-up. Clamped to 10 deg here so AoA stays below the Gazebo stall threshold.
+TKOFF_PITCH_CD 1000
+
+# TKOFF_LVL_ALT: sr75.parm sets 300 m but TKOFF_ALT defaults to 50 m.
+# When level_alt (300) > target_alt (50), the roll-limit interpolation in
+# mode_takeoff.cpp inverts, granting excess roll authority near the ground.
+# Reset to a safe value below target_alt/3 (~16 m).
+TKOFF_LVL_ALT 10
+
+# TECS_SPDWEIGHT: sr75.parm sets 0.2 (near-zero speed priority).
+# TECS ignores airspeed loss and keeps pitching up to hold altitude,
+# turning any near-stall into a full stall. Set to 1.5 to balance
+# speed and altitude error so TECS pitches down when speed bleeds off.
+TECS_SPDWEIGHT 1.5
+
+# TECS_CLMB_MAX: 27 m/s is unachievable at low speed with 400 N thrust on
+# 82.5 kg. TECS demanding steep climbs stresses the Gazebo aero model.
+# Reduce to a value reachable during the initial acceleration phase.
+TECS_CLMB_MAX 12
+
+# RATO_ENABLE: RATO boost physics live in SIM_Plane.cpp (SITL aircraft model).
+# The Gazebo backend (SIM_Gazebo.cpp) never calls that code, so the 5800 N
+# boost is never applied. With RATO_ENABLE=1 the state machine still runs
+# and fires an ABORT after its 8-second timeout, which can interfere with
+# the takeoff sequence. Disable RATO for Gazebo runs.
+RATO_ENABLE 0
+
+# TKOFF_ROTATE_SPD / ARSPD_FBW_MIN / AIRSPEED_MIN:
+# With the Gazebo LiftDrag aero model (cla=2.308, S=1.36 m2, mass=82.5 kg),
+# stall speed calculates to ~46 m/s.  sr75.parm sets rotate at 35 m/s and
+# FBW min at 40 m/s — both below stall.  At 35 m/s the wing needs AoA=20 deg
+# to generate 809 N of lift but stalls at 11.5 deg, so liftoff is impossible
+# through aerodynamics alone. Override all three thresholds to stay above stall.
+TKOFF_ROTATE_SPD 50
+ARSPD_FBW_MIN 48
+AIRSPEED_MIN 48
+
+# SR-75 Gazebo liftoff/safety overrides
+SERVO3_FUNCTION 70
+SERVO3_MIN 1100
+SERVO3_MAX 1900
+SERVO3_TRIM 1100
+SERVO3_REVERSED 0
+
+RATO_ENABLE 0
+
+ARSPD_FBW_MIN 48
+AIRSPEED_MIN 48
+TKOFF_ROTATE_SPD 50
+TKOFF_PITCH_CD 1000
+TKOFF_LVL_ALT 10
+
+TECS_SPDWEIGHT 1.5
+TECS_CLMB_MAX 12
+THR_CRUISE 25
