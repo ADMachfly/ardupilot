@@ -395,7 +395,12 @@ class VehicleInfo(object):
             },
             "gazebo-sr75": {
                 "waf_target": "bin/arduplane",
-                "default_params_filename": [ "default_params/gazebo-sr75.parm", "models/sr75.parm",],
+                "default_params_filename": [
+                    "models/plane.parm",
+                    "models/sr75.parm",
+                    "default_params/gazebo-sr75.parm",
+                ],
+                "external": True,
             },
             "last_letter": {
                 "waf_target": "bin/arduplane",
@@ -578,6 +583,5 @@ class VehicleInfo(object):
             ret["waf_target"] = opts.build_target
 
         return ret
-
 
 
