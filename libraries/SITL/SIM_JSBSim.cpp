@@ -115,6 +115,7 @@ bool JSBSim::create_templates(void)
 "      <condition> simulation/sim-time-sec le 0.01 </condition>\n"
 "      <set name=\"propulsion/engine[0]/set-running\" value=\"1\"/>\n"
 "      <set name=\"propulsion/engine[1]/set-running\" value=\"1\"/>\n"
+"      <set name=\"propulsion/engine[2]/set-running\" value=\"1\"/>\n"
 "      <notify/>\n"
 "    </event>\n"
 "\n"
@@ -346,6 +347,7 @@ void JSBSim::send_servos(const struct sitl_input &input)
     float aileron  = filtered_servo_angle(input, 0);
     float elevator = filtered_servo_angle(input, 1);
     float throttle = filtered_servo_range(input, 2);
+    float rato_throttle = filtered_servo_range(input, 6);
     float rudder   = filtered_servo_angle(input, 3);
     if (frame == FRAME_ELEVON) {
         // fake an elevon plane
@@ -368,16 +370,20 @@ void JSBSim::send_servos(const struct sitl_input &input)
              "set fcs/elevator-cmd-norm %f\n"
              "set fcs/rudder-cmd-norm %f\n"
              "set fcs/throttle-cmd-norm %f\n"
+             "set fcs/turbojet-throttle-cmd-norm %f\n"
+             "set fcs/rato-throttle-cmd-norm %f\n"
              "set atmosphere/psiw-rad %f\n"
              "set atmosphere/wind-mag-fps %f\n"
              "set atmosphere/turbulence/milspec/windspeed_at_20ft_AGL-fps %f\n"
              "set atmosphere/turbulence/milspec/severity %f\n"
              "iterate 1\n",
-             aileron, elevator, rudder, throttle,
-             radians(input.wind.direction),
-             wind_speed_fps,
-             wind_speed_fps/3,
-             input.wind.turbulence);
+              aileron, elevator, rudder, throttle,
+              throttle,
+              rato_throttle,
+              radians(input.wind.direction),
+              wind_speed_fps,
+              wind_speed_fps/3,
+              input.wind.turbulence);
     ssize_t buflen = strlen(buf);
     ssize_t sent = sock_control.send(buf, buflen);
     free(buf);
