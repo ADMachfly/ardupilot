@@ -1,0 +1,180 @@
+<?xml version="1.0"?>
+<aerodynamics>
+
+  <!-- Level-1 placeholder aero. Positive alpha increases lift. -->
+  <!-- Cm_alpha is negative for static pitch stability. -->
+  <!-- Symmetric elevon deflection provides pitch control. -->
+
+  <axis name="LIFT">
+    <function name="aero/sr75/lift_force">
+      <description>L = q*S*(CL0 + CLalpha*alpha).</description>
+      <product>
+        <property>aero/qbar-psf</property>
+        <property>metrics/Sw-sqft</property>
+        <sum>
+          <value>0.20</value>
+          <product>
+            <value>5.0</value>
+            <property>aero/alpha-rad</property>
+          </product>
+        </sum>
+      </product>
+    </function>
+  </axis>
+
+  <axis name="DRAG">
+    <function name="aero/sr75/drag_force">
+      <description>D = q*S*(CD0 + K*alpha^2 + control drag).</description>
+      <product>
+        <property>aero/qbar-psf</property>
+        <property>metrics/Sw-sqft</property>
+        <sum>
+          <value>0.04</value>
+          <product>
+            <value>0.35</value>
+            <property>aero/alpha-rad</property>
+            <property>aero/alpha-rad</property>
+          </product>
+          <product>
+            <value>0.05</value>
+            <sum>
+              <abs>
+                <property>fcs/left-elevon-pos-rad</property>
+              </abs>
+              <abs>
+                <property>fcs/right-elevon-pos-rad</property>
+              </abs>
+              <abs>
+                <property>fcs/rudder3-pos-rad</property>
+              </abs>
+              <abs>
+                <property>fcs/rudder4-pos-rad</property>
+              </abs>
+            </sum>
+          </product>
+        </sum>
+      </product>
+    </function>
+  </axis>
+
+  <axis name="SIDE">
+    <function name="aero/sr75/side_force">
+      <description>Side force from sideslip and the two rudder surfaces.</description>
+      <product>
+        <property>aero/qbar-psf</property>
+        <property>metrics/Sw-sqft</property>
+        <sum>
+          <product>
+            <value>-0.30</value>
+            <property>aero/beta-rad</property>
+          </product>
+          <product>
+            <value>0.075</value>
+              <sum>
+                <property>fcs/rudder3-pos-rad</property>
+                <property>fcs/rudder4-pos-rad</property>
+              </sum>
+          </product>
+        </sum>
+      </product>
+    </function>
+  </axis>
+
+  <axis name="ROLL">
+    <function name="aero/sr75/roll_moment">
+      <description>Roll moment from beta, roll damping, differential elevon, and small rudder coupling.</description>
+      <product>
+        <property>aero/qbar-psf</property>
+        <property>metrics/Sw-sqft</property>
+        <property>metrics/bw-ft</property>
+        <sum>
+          <product>
+            <value>-0.08</value>
+            <property>aero/beta-rad</property>
+          </product>
+          <product>
+            <value>-0.50</value>
+            <property>velocities/p-aero-rad_sec</property>
+            <property>metrics/bw-ft</property>
+            <property>aero/bi2vel</property>
+          </product>
+          <product>
+            <value>0.20</value>
+            <difference>
+              <property>fcs/left-elevon-pos-rad</property>
+              <property>fcs/right-elevon-pos-rad</property>
+            </difference>
+          </product>
+          <product>
+            <value>0.01</value>
+            <sum>
+              <property>fcs/rudder3-pos-rad</property>
+              <property>fcs/rudder4-pos-rad</property>
+            </sum>
+          </product>
+        </sum>
+      </product>
+    </function>
+  </axis>
+
+  <axis name="PITCH">
+    <function name="aero/sr75/pitch_moment">
+      <description>Pitch moment with Cm_alpha=-1.0, Cm_q=-10.0, and symmetric elevon pitch control.</description>
+      <product>
+        <property>aero/qbar-psf</property>
+        <property>metrics/Sw-sqft</property>
+        <property>metrics/cbarw-ft</property>
+        <sum>
+          <product>
+            <value>-1.0</value>
+            <property>aero/alpha-rad</property>
+          </product>
+          <product>
+            <value>-10.0</value>
+            <property>velocities/q-aero-rad_sec</property>
+            <property>metrics/cbarw-ft</property>
+            <property>aero/ci2vel</property>
+          </product>
+          <product>
+            <value>-0.60</value>
+            <sum>
+              <property>fcs/left-elevon-pos-rad</property>
+              <property>fcs/right-elevon-pos-rad</property>
+            </sum>
+          </product>
+        </sum>
+      </product>
+    </function>
+  </axis>
+
+  <axis name="YAW">
+    <function name="aero/sr75/yaw_moment">
+      <description>Yaw moment from beta stability, yaw damping, and both rudder surfaces.</description>
+      <product>
+        <property>aero/qbar-psf</property>
+        <property>metrics/Sw-sqft</property>
+        <property>metrics/bw-ft</property>
+        <sum>
+          <product>
+            <value>0.10</value>
+            <property>aero/beta-rad</property>
+          </product>
+          <product>
+            <value>-0.30</value>
+            <property>velocities/r-aero-rad_sec</property>
+            <property>metrics/bw-ft</property>
+            <property>aero/bi2vel</property>
+          </product>
+          <product>
+            <value>0.06</value>
+            <sum>
+              <property>fcs/rudder3-pos-rad</property>
+              <property>fcs/rudder4-pos-rad</property>
+            </sum>
+          </product>
+        </sum>
+      </product>
+    </function>
+  </axis>
+
+</aerodynamics>

@@ -1,0 +1,122 @@
+<?xml version="1.0"?>
+<fdm_config name="sr_75_6_dof" version="2.0" release="BETA"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="http://jsbsim.sourceforge.net/JSBSim.xsd">
+
+  <fileheader>
+    <author>Machfly Aerospace / OpenAI Codex</author>
+    <description>Clean modular SR-75 6-DOF JSBSim Level-1 aircraft model.</description>
+    <note>
+      Placeholder model for initial 6-DOF validation only. Mass, geometry, propulsion,
+      flight controls, ground reactions, and aerodynamic coefficients must be replaced
+      with measured or vendor-qualified SR-75 data before performance use.
+    </note>
+  </fileheader>
+
+  <property value="0.0">fcs/elevator-cmd-norm</property>
+  <property value="0.0">fcs/aileron-cmd-norm</property>
+  <property value="0.0">fcs/rudder-cmd-norm</property>
+  <property value="0.0">fcs/turbojet-throttle-cmd-norm</property>
+  <property value="0.0">fcs/rato-throttle-cmd-norm</property>
+  <property value="0.0">fcs/throttle-cmd-norm</property>
+
+  <metrics>
+    <wingarea unit="M2">1.0</wingarea>
+    <wingspan unit="M">1.6</wingspan>
+    <chord unit="M">0.625</chord>
+
+    <htailarea unit="M2">0.16</htailarea>
+    <htailarm unit="M">0.75</htailarm>
+    <vtailarea unit="M2">0.12</vtailarea>
+    <vtailarm unit="M">0.72</vtailarm>
+
+    <location name="AERORP" unit="M">
+      <x>0.0</x>
+      <y>0.0</y>
+      <z>0.0</z>
+    </location>
+
+    <location name="EYEPOINT" unit="M">
+      <x>0.55</x>
+      <y>0.0</y>
+      <z>0.12</z>
+    </location>
+
+    <location name="VRP" unit="M">
+      <x>0.0</x>
+      <y>0.0</y>
+      <z>0.0</z>
+    </location>
+  </metrics>
+
+  <mass_balance>
+    <ixx unit="KG*M2">19.0</ixx>
+    <iyy unit="KG*M2">20.5</iyy>
+    <izz unit="KG*M2">33.7</izz>
+    <ixz unit="KG*M2">0.0</ixz>
+
+    <emptywt unit="KG">82.5</emptywt>
+
+    <location name="CG" unit="M">
+      <x>-0.12</x>
+      <y>0.0</y>
+      <z>-0.04</z>
+    </location>
+
+    <!-- Static attached booster mass placeholder. RATO propellant is fuel tank mass only. -->
+    <pointmass name="RATO_BOOSTER_DRY_AND_CASE">
+      <weight unit="KG">10.0</weight>
+      <location unit="M">
+        <x>-0.60</x>
+        <y>0.0</y>
+        <z>-0.10</z>
+      </location>
+    </pointmass>
+  </mass_balance>
+
+  <propulsion file="Systems/SR75_propulsion.xml"/>
+  <flight_control file="Systems/SR75_fcs.xml"/>
+  <aerodynamics file="Systems/SR75_aerodynamics.xml"/>
+  <ground_reactions file="Systems/SR75_ground_reactions.xml"/>
+
+<output name="sr_75_6_dof_debug.csv" type="CSV" rate="20">
+  <property>simulation/sim-time-sec</property>
+  <property>position/lat-gc-deg</property>
+  <property>position/long-gc-deg</property>
+  <property>position/h-sl-ft</property>
+  <property>position/h-agl-ft</property>
+  <property>attitude/phi-deg</property>
+  <property>attitude/theta-deg</property>
+  <property>attitude/psi-deg</property>
+  <property>velocities/vt-fps</property>
+  <property>velocities/vc-kts</property>
+  <property>velocities/v-north-fps</property>
+  <property>velocities/v-east-fps</property>
+  <property>velocities/v-down-fps</property>
+  <property>velocities/p-rad_sec</property>
+  <property>velocities/q-rad_sec</property>
+  <property>velocities/r-rad_sec</property>
+  <property>accelerations/udot-ft_sec2</property>
+  <property>accelerations/vdot-ft_sec2</property>
+  <property>accelerations/wdot-ft_sec2</property>
+  <property>aero/alpha-rad</property>
+  <property>fcs/throttle-cmd-norm</property>
+  <property>fcs/rato-throttle-cmd-norm</property>
+  <property>propulsion/engine[0]/thrust-lbs</property>
+  <property>propulsion/engine[1]/thrust-lbs</property>
+  <property>propulsion/engine[2]/thrust-lbs</property>
+  <property>inertia/weight-lbs</property>
+  <property>inertia/mass-slugs</property>
+  <property>fcs/aileron-cmd-norm</property>
+  <property>fcs/elevator-cmd-norm</property>
+  <property>fcs/rudder-cmd-norm</property>
+  <property>fcs/left-elevon-pos-rad</property>
+  <property>fcs/right-elevon-pos-rad</property>
+  <property>fcs/rudder3-pos-rad</property>
+  <property>fcs/rudder4-pos-rad</property>
+  <property>aero/sr75/roll_moment</property>
+  <property>aero/sr75/pitch_moment</property>
+  <property>aero/sr75/yaw_moment</property>
+</output>
+
+</fdm_config>

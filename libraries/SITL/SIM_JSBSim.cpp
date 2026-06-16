@@ -114,6 +114,7 @@ bool JSBSim::create_templates(void)
 "    <event name=\"start engine\">\n"
 "      <condition> simulation/sim-time-sec le 0.01 </condition>\n"
 "      <set name=\"propulsion/engine[0]/set-running\" value=\"1\"/>\n"
+"      <set name=\"propulsion/engine[1]/set-running\" value=\"1\"/>\n"
 "      <notify/>\n"
 "    </event>\n"
 "\n"

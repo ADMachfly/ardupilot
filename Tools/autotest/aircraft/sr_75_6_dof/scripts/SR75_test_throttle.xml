@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<runscript xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="http://jsbsim.sf.net/JSBSimScript.xsd"
+    name="SR75 throttle sign diagnostic">
+
+  <use aircraft="sr_75_6_dof" initialize="cruise_init"/>
+
+  <run start="0.0" end="5.0" dt="0.008333">
+    <event name="Apply positive throttle">
+      <condition>simulation/sim-time-sec ge 0.0</condition>
+      <set name="propulsion/engine[0]/set-running" value="1"/>
+      <set name="propulsion/engine[1]/set-running" value="1"/>
+      <set name="fcs/turbojet-throttle-cmd-norm" value="0.8"/>
+      <set name="fcs/rato-throttle-cmd-norm" value="0.0"/>
+      <notify/>
+    </event>
+  </run>
+
+  <output name="SR75_test_throttle.csv" type="CSV" rate="50">
+    <property>simulation/sim-time-sec</property>
+    <property>fcs/turbojet-throttle-cmd-norm</property>
+    <property>propulsion/engine[0]/thrust-lbs</property>
+    <property>propulsion/engine[1]/thrust-lbs</property>
+    <property>velocities/vt-fps</property>
+    <property>velocities/vc-kts</property>
+  </output>
+
+</runscript>

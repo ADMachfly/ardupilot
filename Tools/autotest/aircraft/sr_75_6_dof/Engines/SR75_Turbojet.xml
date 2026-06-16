@@ -1,0 +1,92 @@
+<?xml version="1.0"?>
+<turbine_engine name="SR75_Turbojet_P400_PRO_LN">
+
+  <!--
+    JetCat/etCat P400-PRO-LN turbine, per engine, based on the supplied
+    datasheet/photo.
+
+    Datasheet values retained as source metadata:
+    - Pressure ratio: 3.8
+    - Mass flow: 0.67 kg/s
+    - Full-load fuel consumption: 1392 ml/min
+    - Idle fuel consumption: 200 ml/min
+    - Engine weight: 4010 g
+    - Diameter: 148.4 mm
+    - Length: 390 mm
+    - Exhaust gas temperature: 480-750 deg C
+    - Idle speed: 30000 rpm
+    - Max speed: 98000 rpm
+    - Idle thrust: 14 N
+    - Max thrust: 425 N from typed spec; photo table appears to show 400 N
+    - Exhaust gas velocity: 2122 km/h
+    - Exhaust gas power output: 116.4 kW
+    - SFC at max rpm: 0.157 kg/N/h
+
+    JSBSim uses normalized turbine N1/N2 percentages, so physical rpm, pressure
+    ratio, mass flow, EGT, generator, ECU, and physical dimensions are documented
+    here but are not directly consumed by FGTurbine.
+  -->
+
+  <!-- Per-engine static sea-level thrust. 425 N = 95.54 lbf. -->
+  <milthrust unit="N">425</milthrust>
+  <maxthrust unit="N">425</maxthrust>
+
+  <bypassratio>0.0</bypassratio>
+  <bleed>0.03</bleed>
+
+  <!-- SFC 0.157 kg/N/h converts to 1.54 lbm/hr/lbf. -->
+  <tsfc>1.54</tsfc>
+  <atsfc>1.54</atsfc>
+
+  <!-- 200 ml/min fuel at about 0.799 kg/L = 0.1598 kg/min. -->
+  <idlefuelflow unit="KG/MIN">0.1598</idlefuelflow>
+
+  <ignitionn1>5.0</ignitionn1>
+  <ignitionn2>20.0</ignitionn2>
+  <idlen1>30.6</idlen1>
+  <idlen2>30.6</idlen2>
+  <maxn1>100.0</maxn1>
+  <maxn2>100.0</maxn2>
+
+  <n1spinup>1.0</n1spinup>
+  <n2spinup>2.5</n2spinup>
+  <n1startrate>1.0</n1startrate>
+  <n2startrate>1.6</n2startrate>
+  <n1spindown>1.5</n1spindown>
+  <n2spindown>1.5</n2spindown>
+
+  <augmented>0</augmented>
+  <augmethod>0</augmethod>
+  <injected>0</injected>
+
+  <function name="IdleThrust">
+    <description>Idle thrust multiplier. Sea-level idle target is 14 N / 425 N.</description>
+    <table>
+      <independentVar lookup="row">velocities/mach</independentVar>
+      <independentVar lookup="column">atmosphere/density-altitude</independentVar>
+      <tableData>
+               0       10000   20000   30000
+        0.0    0.033   0.026   0.020   0.015
+        0.3    0.033   0.026   0.020   0.015
+        0.6    0.030   0.024   0.018   0.013
+        0.8    0.028   0.022   0.016   0.012
+      </tableData>
+    </table>
+  </function>
+
+  <function name="MilThrust">
+    <description>Max dry thrust lapse multiplier. Altitude lapse is assumed.</description>
+    <table>
+      <independentVar lookup="row">velocities/mach</independentVar>
+      <independentVar lookup="column">atmosphere/density-altitude</independentVar>
+      <tableData>
+               0       10000   20000   30000
+        0.0    1.00    0.80    0.60    0.45
+        0.3    1.00    0.82    0.62    0.46
+        0.6    0.95    0.78    0.58    0.42
+        0.8    0.90    0.72    0.54    0.38
+      </tableData>
+    </table>
+  </function>
+
+</turbine_engine>

@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<initialize name="SR75 6DOF RATO launcher start">
+  <latitude unit="DEG">32.5378085</latitude>
+  <longitude unit="DEG">74.3661944</longitude>
+  <altitude unit="M">260.0</altitude>
+  <vt unit="KTS">5.0</vt>
+  <gamma unit="DEG">20.0</gamma>
+  <psi unit="DEG">315.0</psi>
+  <phi unit="DEG">0.0</phi>
+  <theta unit="DEG">20.0</theta>
+</initialize>

@@ -1,0 +1,63 @@
+<?xml version="1.0"?>
+<turbine_engine name="SR75_RATO_5p8kN">
+
+  <!-- RATO placeholder for initial launch dynamics only. -->
+  <!-- Implemented as high-TSFC direct-thrust engine so the requested direct thruster can be used. -->
+  <!-- 5800 N is 1303.9 lbf. TSFC about 18.63 lb/hr/lbf consumes about 9.18 kg in 3 s. -->
+  <milthrust unit="N">5800</milthrust>
+  <maxthrust unit="N">5800</maxthrust>
+
+  <bypassratio>0.0</bypassratio>
+  <bleed>0.0</bleed>
+  <tsfc>18.63</tsfc>
+  <atsfc>18.63</atsfc>
+
+  <ignitionn1>5.0</ignitionn1>
+  <ignitionn2>20.0</ignitionn2>
+  <idlen1>30.0</idlen1>
+  <idlen2>55.0</idlen2>
+  <maxn1>100.0</maxn1>
+  <maxn2>100.0</maxn2>
+
+  <n1spinup>0.05</n1spinup>
+  <n2spinup>0.05</n2spinup>
+  <n1startrate>100.0</n1startrate>
+  <n2startrate>100.0</n2startrate>
+  <n1spindown>0.05</n1spindown>
+  <n2spindown>0.05</n2spindown>
+
+  <augmented>0</augmented>
+  <augmethod>0</augmethod>
+  <injected>0</injected>
+
+  <function name="IdleThrust">
+    <description>No useful idle thrust for the RATO placeholder.</description>
+    <value>0.0</value>
+  </function>
+
+  <function name="MilThrust">
+    <description>Full RATO thrust multiplier.</description>
+    <value>1.0</value>
+  </function>
+
+  <function name="N1SpoolUp">
+    <description>RATO thrust is effectively immediate for the launch burn.</description>
+    <value>100000.0</value>
+  </function>
+
+  <function name="N2SpoolUp">
+    <description>RATO thrust is effectively immediate for the launch burn.</description>
+    <value>100000.0</value>
+  </function>
+
+  <function name="N1SpoolDown">
+    <description>RATO thrust ends immediately at burnout.</description>
+    <value>100000.0</value>
+  </function>
+
+  <function name="N2SpoolDown">
+    <description>RATO thrust ends immediately at burnout.</description>
+    <value>100000.0</value>
+  </function>
+
+</turbine_engine>

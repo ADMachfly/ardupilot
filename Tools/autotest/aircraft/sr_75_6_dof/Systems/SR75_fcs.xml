@@ -1,0 +1,143 @@
+<?xml version="1.0"?>
+<flight_control name="SR75 Flight Control">
+
+  <property value="0.0">fcs/turbojet-throttle-cmd-norm</property>
+  <property value="0.0">fcs/rato-throttle-cmd-norm</property>
+
+  <channel name="Throttle">
+    <!-- Shared SR-75 FADEC throttle controller -->
+    <actuator name="fcs/sr75-fadec-throttle">
+      <input>fcs/throttle-cmd-norm</input>
+      <lag>0.25</lag>
+      <clipto>
+        <min>0.0</min>
+        <max>1.0</max>
+      </clipto>
+      <output>fcs/sr75-fadec-throttle-pos-norm</output>
+    </actuator>
+
+    <!-- Left turbojet receives shared FADEC output -->
+    <pure_gain name="fcs/left-turbojet-throttle">
+      <input>fcs/sr75-fadec-throttle-pos-norm</input>
+      <gain>1.0</gain>
+      <output>fcs/throttle-cmd-norm[0]</output>
+    </pure_gain>
+
+    <!-- Right turbojet receives shared FADEC output -->
+    <pure_gain name="fcs/right-turbojet-throttle">
+      <input>fcs/sr75-fadec-throttle-pos-norm</input>
+      <gain>1.0</gain>
+      <output>fcs/throttle-cmd-norm[1]</output>
+    </pure_gain>
+
+    <actuator name="fcs/rato-throttle-actuator">
+      <input>fcs/rato-throttle-cmd-norm</input>
+      <lag>100000.0</lag>
+      <rate_limit>100000.0</rate_limit>
+      <clipto>
+        <min>0.0</min>
+        <max>1.0</max>
+      </clipto>
+      <output>fcs/throttle-cmd-norm[2]</output>
+    </actuator>
+  </channel>
+
+  <channel name="Elevon Mixer">
+    <pure_gain name="fcs/negative-aileron-command">
+      <input>fcs/aileron-cmd-norm</input>
+      <gain>-1.0</gain>
+      <output>fcs/negative-aileron-cmd-norm</output>
+    </pure_gain>
+
+    <summer name="fcs/left-elevon-mixer">
+      <input>fcs/elevator-cmd-norm</input>
+      <input>fcs/aileron-cmd-norm</input>
+      <clipto>
+        <min>-1.0</min>
+        <max>1.0</max>
+      </clipto>
+      <output>fcs/left-elevon-cmd-norm</output>
+    </summer>
+
+    <summer name="fcs/right-elevon-mixer">
+      <input>fcs/elevator-cmd-norm</input>
+      <input>fcs/negative-aileron-cmd-norm</input>
+      <clipto>
+        <min>-1.0</min>
+        <max>1.0</max>
+      </clipto>
+      <output>fcs/right-elevon-cmd-norm</output>
+    </summer>
+
+    <actuator name="fcs/left-elevon-actuator">
+      <input>fcs/left-elevon-cmd-norm</input>
+      <lag>12.0</lag>
+      <rate_limit>3.0</rate_limit>
+      <clipto>
+        <min>-1.0</min>
+        <max>1.0</max>
+      </clipto>
+      <output>fcs/left-elevon-pos-norm</output>
+    </actuator>
+
+    <actuator name="fcs/right-elevon-actuator">
+      <input>fcs/right-elevon-cmd-norm</input>
+      <lag>12.0</lag>
+      <rate_limit>3.0</rate_limit>
+      <clipto>
+        <min>-1.0</min>
+        <max>1.0</max>
+      </clipto>
+      <output>fcs/right-elevon-pos-norm</output>
+    </actuator>
+
+    <pure_gain name="fcs/left-elevon-radians">
+      <input>fcs/left-elevon-pos-norm</input>
+      <gain>0.436332</gain>
+      <output>fcs/left-elevon-pos-rad</output>
+    </pure_gain>
+
+    <pure_gain name="fcs/right-elevon-radians">
+      <input>fcs/right-elevon-pos-norm</input>
+      <gain>0.436332</gain>
+      <output>fcs/right-elevon-pos-rad</output>
+    </pure_gain>
+  </channel>
+
+  <channel name="Yaw">
+    <actuator name="fcs/rudder3-actuator">
+      <input>fcs/rudder-cmd-norm</input>
+      <lag>10.0</lag>
+      <rate_limit>3.0</rate_limit>
+      <clipto>
+        <min>-1.0</min>
+        <max>1.0</max>
+      </clipto>
+      <output>fcs/rudder3-pos-norm</output>
+    </actuator>
+
+    <actuator name="fcs/rudder4-actuator">
+      <input>fcs/rudder-cmd-norm</input>
+      <lag>10.0</lag>
+      <rate_limit>3.0</rate_limit>
+      <clipto>
+        <min>-1.0</min>
+        <max>1.0</max>
+      </clipto>
+      <output>fcs/rudder4-pos-norm</output>
+    </actuator>
+
+    <pure_gain name="fcs/rudder3-radians">
+      <input>fcs/rudder3-pos-norm</input>
+      <gain>0.436332</gain>
+      <output>fcs/rudder3-pos-rad</output>
+    </pure_gain>
+
+    <pure_gain name="fcs/rudder4-radians">
+      <input>fcs/rudder4-pos-norm</input>
+      <gain>0.436332</gain>
+      <output>fcs/rudder4-pos-rad</output>
+    </pure_gain>
+  </channel>
+
+</flight_control>
