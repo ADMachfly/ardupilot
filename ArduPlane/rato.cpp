@@ -17,6 +17,7 @@
 #include "rato.h"
 
 #include <AP_HAL/AP_HAL.h>
+#include <SRV_Channel/SRV_Channel.h>
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  Parameter table
@@ -138,6 +139,7 @@ void RATOController::reset()
     last_dist_m = 0.0f;
     last_alt_gain_m = 0.0f;
     last_speed_mps = 0.0f;
+    set_ignition_output(false);   // ← ADD THIS
 }
 
 void RATOController::init(const Location& loc, float alt_m)
@@ -189,15 +191,18 @@ bool RATOController::update(float dist_m, float alt_gain_m, float speed_mps)
     case State::READY:
     // Placeholder state before ignition command.
     // Later this can check EKF/GPS/arming conditions.
+        set_ignition_output(false);    
         state = State::IGNITION;
         return false;
 
     case State::IGNITION:
     // Later this state will command ignition output channel.    
+        set_ignition_output(true);
         state = State::BOOST;
         return false;
 
     case State::BOOST:
+        set_ignition_output(true);
     /*
         Stay in BOOST until burn time is complete.
 
@@ -205,11 +210,13 @@ bool RATOController::update(float dist_m, float alt_gain_m, float speed_mps)
         For now this is only timing logic.
     */    
         if (elapsed_s() >= burn_time.get()) {
+            set_ignition_output(false);
             state = State::BURNOUT;
         }
         return false;
 
     case State::BURNOUT:
+         set_ignition_output(false);
         /*
           Booster burn is complete.
 
@@ -219,7 +226,7 @@ bool RATOController::update(float dist_m, float alt_gain_m, float speed_mps)
         state = State::ENGINE_TAKEOVER;
         return false;
 
-    case State::ENGINE_TAKEOVER:
+    // case State::ENGINE_TAKEOVER:
         /*
           Wait here until the measured release envelope is achieved:
 
@@ -227,7 +234,14 @@ bool RATOController::update(float dist_m, float alt_gain_m, float speed_mps)
               altitude >= RATO_REL_ALT
               speed    >= RATO_REL_SPD
         */
-        state = State::EJECT;
+        // state = State::EJECT;
+        // return false;
+        // Edits for the JSBSim test The fix makes it wait until release_envelope_met() returns true before moving to EJECT.
+
+    case State::ENGINE_TAKEOVER:
+        if (release_envelope_met()) {
+            state = State::EJECT;
+        }
         return false;
 
     case State::EJECT:
@@ -235,14 +249,17 @@ bool RATOController::update(float dist_m, float alt_gain_m, float speed_mps)
           Later this state will command the ejection channel.
           For now, just mark the RATO sequence complete.
         */
+        set_ignition_output(false);
         state = State::COMPLETE;
         return true;
 
     case State::COMPLETE:
     // RATO is complete; mission TAKEOFF may complete.
+    set_ignition_output(false);
     return true;
 
     case State::ABORT:
+    set_ignition_output(false);
     // RATO aborted; caller may fall back to normal takeoff.
     return true;    
     
@@ -282,6 +299,23 @@ bool RATOController::is_complete() const
 bool RATOController::is_aborted() const
 {
     return state == State::ABORT;
+}
+
+// ADD THIS BLOCK immediately after: edits for the JSBSim test
+bool RATOController::is_boosting() const
+{
+    return state == State::IGNITION || state == State::BOOST;
+}
+// this block only for JSBSim test. 
+
+// ADD HERE ↓
+void RATOController::set_ignition_output(bool on)
+{
+    const int8_t ch = ign_chan.get();
+    if (ch <= 0) {
+        return;
+    }
+    SRV_Channels::set_output_pwm_chan(ch - 1, on ? 2000 : 1000);
 }
 
 float RATOController::elapsed_s() const

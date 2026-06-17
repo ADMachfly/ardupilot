@@ -61,6 +61,7 @@ public:
     bool is_active() const;
     bool is_complete() const;
     bool is_aborted() const;
+    bool is_boosting() const; // ← new, sits next to is_active(), is_complete(), is_aborted()
 
     State get_state() const { return state; }
     const char *state_name() const;
@@ -101,4 +102,7 @@ private:
     
     // Returns true when altitude + distance + speed release envelope is satisfied.
     bool release_envelope_met() const;
+
+    // Commands ignition servo/relay channel on or off.
+    void set_ignition_output(bool on);    // ← ADD THIS LINE
 };
