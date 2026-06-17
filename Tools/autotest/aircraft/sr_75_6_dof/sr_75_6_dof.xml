@@ -87,6 +87,7 @@
   <property>position/h-agl-ft</property>
   <property>attitude/phi-deg</property>
   <property>attitude/theta-deg</property>
+  <property>attitude/theta-rad</property>
   <property>attitude/psi-deg</property>
   <property>velocities/vt-fps</property>
   <property>velocities/vc-kts</property>
@@ -102,6 +103,8 @@
   <property>aero/alpha-rad</property>
   <property>fcs/throttle-cmd-norm</property>
   <property>fcs/rato-throttle-cmd-norm</property>
+  <property>fcs/throttle-cmd-norm[2]</property>
+  <property>propulsion/engine[2]/set-running</property>
   <property>propulsion/engine[0]/thrust-lbs</property>
   <property>propulsion/engine[1]/thrust-lbs</property>
   <property>propulsion/engine[2]/thrust-lbs</property>

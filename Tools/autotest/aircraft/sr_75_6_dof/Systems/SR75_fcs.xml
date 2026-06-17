@@ -30,16 +30,11 @@
       <output>fcs/throttle-cmd-norm[1]</output>
     </pure_gain>
 
-    <actuator name="fcs/rato-throttle-actuator">
+    <pure_gain name="fcs/rato-throttle-actuator">
       <input>fcs/rato-throttle-cmd-norm</input>
-      <lag>100000.0</lag>
-      <rate_limit>100000.0</rate_limit>
-      <clipto>
-        <min>0.0</min>
-        <max>1.0</max>
-      </clipto>
+      <gain>1.0</gain>
       <output>fcs/throttle-cmd-norm[2]</output>
-    </actuator>
+    </pure_gain>
   </channel>
 
   <channel name="Elevon Mixer">

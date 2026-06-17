@@ -91,6 +91,8 @@ bool JSBSim::create_templates(void)
     if (f == nullptr) {
         AP_HAL::panic("Unable to create jsbsim script %s", jsbsim_script);
     }
+    const bool skip_simple_trim = strstr(jsbsim_model, "sr_75_6_dof") != nullptr;
+
     fprintf(f,
 "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
 "<?xml-stylesheet type=\"text/xsl\" href=\"http://jsbsim.sf.net/JSBSimScript.xsl\"?>\n"
@@ -115,24 +117,29 @@ bool JSBSim::create_templates(void)
 "      <condition> simulation/sim-time-sec le 0.01 </condition>\n"
 "      <set name=\"propulsion/engine[0]/set-running\" value=\"1\"/>\n"
 "      <set name=\"propulsion/engine[1]/set-running\" value=\"1\"/>\n"
-"      <set name=\"propulsion/engine[2]/set-running\" value=\"1\"/>\n"
 "      <notify/>\n"
 "    </event>\n"
-"\n"
-"    <event name=\"Trim\">\n"
-"      <condition>simulation/sim-time-sec ge 0.01</condition>\n"
-"      <set name=\"simulation/do_simple_trim\" value=\"2\"/>\n"
-"      <notify/>\n"
-"    </event>\n"
-"  </run>\n"
-"\n"
-"</runscript>\n"
-"",
+"\n",
             jsbsim_model,
             jsbsim_model,
             jsbsim_model,
             control_port,
             1.0/rate_hz);
+
+    if (!skip_simple_trim) {
+        fprintf(f,
+"    <event name=\"Trim\">\n"
+"      <condition>simulation/sim-time-sec ge 0.01</condition>\n"
+"      <set name=\"simulation/do_simple_trim\" value=\"2\"/>\n"
+"      <notify/>\n"
+"    </event>\n"
+"\n");
+    }
+
+    fprintf(f,
+"  </run>\n"
+"\n"
+"</runscript>\n");
     fclose(f);
 
     f = fopen(jsbsim_fgout, "w");
@@ -365,21 +372,22 @@ void JSBSim::send_servos(const struct sitl_input &input)
         rudder   = (ch2+ch1)/2.0f;
     }
     float wind_speed_fps = input.wind.speed / FEET_TO_METERS;
+    int rato_running = (rato_throttle > 0.0f) ? 1 : 0;
     asprintf(&buf,
              "set fcs/aileron-cmd-norm %f\n"
              "set fcs/elevator-cmd-norm %f\n"
              "set fcs/rudder-cmd-norm %f\n"
              "set fcs/throttle-cmd-norm %f\n"
-             "set fcs/turbojet-throttle-cmd-norm %f\n"
              "set fcs/rato-throttle-cmd-norm %f\n"
+             "set propulsion/engine[2]/set-running %d\n"
              "set atmosphere/psiw-rad %f\n"
              "set atmosphere/wind-mag-fps %f\n"
              "set atmosphere/turbulence/milspec/windspeed_at_20ft_AGL-fps %f\n"
              "set atmosphere/turbulence/milspec/severity %f\n"
              "iterate 1\n",
               aileron, elevator, rudder, throttle,
-              throttle,
               rato_throttle,
+              rato_running,
               radians(input.wind.direction),
               wind_speed_fps,
               wind_speed_fps/3,

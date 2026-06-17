@@ -18,6 +18,7 @@
 
 #include <AP_HAL/AP_HAL.h>
 #include <SRV_Channel/SRV_Channel.h>
+#include <GCS_MAVLink/GCS.h>     // ← ADD THIS for gcs()
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  Parameter table
@@ -176,9 +177,24 @@ bool RATOController::update(float dist_m, float alt_gain_m, float speed_mps)
     last_dist_m = dist_m;
     last_alt_gain_m = alt_gain_m;
     last_speed_mps = speed_mps;
+
+    gcs().send_text(MAV_SEVERITY_INFO,
+                "RATO state=%s t=%.2f d=%.1f alt=%.1f spd=%.1f",
+                state_name(),
+                (double)elapsed_s(),
+                (double)dist_m,
+                (double)alt_gain_m,
+                (double)speed_mps);
     
     // Timeout safety: prevents staying stuck in RATO forever.    
     if (timeout_s.get() > 0.0f && elapsed_s() > timeout_s.get()) {
+
+            // ADD THIS BLOCK ↓
+        gcs().send_text(MAV_SEVERITY_WARNING,
+                        "RATO abort timeout t=%.2f TMO=%.2f",
+                        (double)elapsed_s(),
+                        (double)timeout_s.get());
+                        
         state = State::ABORT;
         return true;
     }
@@ -188,12 +204,19 @@ bool RATOController::update(float dist_m, float alt_gain_m, float speed_mps)
     // No RATO action. Let normal takeoff continue.
         return true;
 
-    case State::READY:
-    // Placeholder state before ignition command.
-    // Later this can check EKF/GPS/arming conditions.
-        set_ignition_output(false);    
-        state = State::IGNITION;
+case State::READY:
+    set_ignition_output(false);
+
+    // Wait until AUTO takeoff has actually started moving.
+    // This prevents RATO burn from expiring before arming/launch.
+    if (speed_mps < 1.0f && dist_m < 1.0f) {
         return false;
+    }
+
+    // Restart RATO timer at actual launch.
+    start_ms = AP_HAL::millis();
+    state = State::IGNITION;
+    return false;
 
     case State::IGNITION:
     // Later this state will command ignition output channel.    
@@ -308,14 +331,21 @@ bool RATOController::is_boosting() const
 }
 // this block only for JSBSim test. 
 
-// ADD HERE ↓
 void RATOController::set_ignition_output(bool on)
 {
     const int8_t ch = ign_chan.get();
     if (ch <= 0) {
         return;
     }
-    SRV_Channels::set_output_pwm_chan(ch - 1, on ? 2000 : 1000);
+    const uint16_t pwm = on ? 2000 : 1000;
+    gcs().send_text(MAV_SEVERITY_INFO,
+                    "RATO ign ch=%d pwm=%u on=%d", (int)ch, (unsigned)pwm, (int)on);
+    // set_output_pwm_chan() only sets have_pwm_mask — if that bit is cleared by
+    // set_output_scaled(k_none,...) the value is silently overwritten next calc_pwm().
+    // set_output_pwm_chan_timeout() additionally holds override_active=true for the
+    // timeout duration, blocking calc_pwm() from recalculating the value.
+    // 300 ms >> 100 ms navigate() period, so BOOST stays at 2000 throughout.
+    SRV_Channels::set_output_pwm_chan_timeout(ch - 1, pwm, 300);
 }
 
 float RATOController::elapsed_s() const
