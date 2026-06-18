@@ -25,11 +25,13 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
-#include <AP_AHRS/AP_AHRS.h>
 #include <AP_HAL/AP_HAL.h>
 
 extern const AP_HAL::HAL& hal;
@@ -43,8 +45,8 @@ namespace SITL {
 
 JSBSim::JSBSim(const char *frame_str) :
     Aircraft(frame_str),
-    sock_control(false),   // TCP control socket to JSBSim
-    sock_fgfdm(true),      // UDP FDM packets from JSBSim
+    sock_control(NEW_NOTHROW SocketAPM_native(false)),   // TCP control socket to JSBSim
+    sock_fgfdm(NEW_NOTHROW SocketAPM_native(true)),      // UDP FDM packets from JSBSim
     initialised(false),
     control_port(0),
     fdm_port(0),
@@ -55,15 +57,20 @@ JSBSim::JSBSim(const char *frame_str) :
     started_jsbsim(false),
     opened_control_socket(false),
     opened_fdm_socket(false),
-    mission_heading_aligned_runtime(false),
-    sr75_yaw_offset_pending(false),
-    sr75_yaw_offset_active(false),
-    sr75_yaw_offset_debug_sent(false),
+    sr75_mission_heading_enabled(false),
+    sr75_launch_heading_deg(0.0f),
+    sr75_restart_pending(false),
+    sr75_restart_complete_msg_pending(false),
+    sr75_last_mission_hash(0),
     last_heading_align_check_ms(0),
-    sr75_desired_heading_rad(0.0f),
-    sr75_yaw_offset_rad(0.0f),
+    jsbsim_time_offset_us(0),
+    last_raw_jsbsim_time_us(0),
+    jsbsim_pid(-1),
     frame(FRAME_NORMAL)
 {
+    sr75_mission_heading_enabled = align_initial_heading_to_mission_wp;
+    align_initial_heading_to_mission_wp = false;
+
     if (strstr(frame_str, "elevon")) {
         frame = FRAME_ELEVON;
     } else if (strstr(frame_str, "vtail")) {
@@ -175,21 +182,26 @@ bool JSBSim::create_templates(void)
     }
     float r, p, y;
     dcm.to_euler(&r, &p, &y);
+
+    if (sr75_last_mission_hash == 0) {
+        sr75_launch_heading_deg = wrap_360(degrees(y));
+    }
+
     fprintf(f,
-            "<?xml version=\"1.0\"?>\n"
-            "<initialize name=\"Start up location\">\n"
-            "  <latitude unit=\"DEG\" type=\"geodetic\"> %f </latitude>\n"
-            "  <longitude unit=\"DEG\"> %f </longitude>\n"
-            "  <altitude unit=\"M\"> 1.3 </altitude>\n"
-            "  <vt unit=\"FT/SEC\"> 0.0 </vt>\n"
-            "  <gamma unit=\"DEG\"> 0.0 </gamma>\n"
-            "  <phi unit=\"DEG\"> 0.0 </phi>\n"
-            "  <theta unit=\"DEG\"> 13.0 </theta>\n"
-            "  <psi unit=\"DEG\"> %f </psi>\n"
-            "</initialize>\n",
-            home.lat*1.0e-7,
-            home.lng*1.0e-7,
-            degrees(y));
+        "<?xml version=\"1.0\"?>\n"
+        "<initialize name=\"Start up location\">\n"
+        "  <latitude unit=\"DEG\" type=\"geodetic\"> %f </latitude>\n"
+        "  <longitude unit=\"DEG\"> %f </longitude>\n"
+        "  <altitude unit=\"M\"> 1.3 </altitude>\n"
+        "  <vt unit=\"FT/SEC\"> 0.0 </vt>\n"
+        "  <gamma unit=\"DEG\"> 0.0 </gamma>\n"
+        "  <phi unit=\"DEG\"> 0.0 </phi>\n"
+        "  <theta unit=\"DEG\"> 13.0 </theta>\n"
+        "  <psi unit=\"DEG\"> %f </psi>\n"
+        "</initialize>\n",
+        home.lat*1.0e-7,
+        home.lng*1.0e-7,
+        sr75_launch_heading_deg);
     fclose(f);
 
     created_templates = true;
@@ -253,6 +265,7 @@ bool JSBSim::start_JSBSim(void)
         exit(1);
     }
     close(p[1]);
+    jsbsim_pid = child_pid;
     jsbsim_stdout = p[0];
 
     // read startup to be sure it is running
@@ -321,19 +334,18 @@ bool JSBSim::open_control_socket(void)
     if (opened_control_socket) {
         return true;
     }
-    if (!sock_control.connect("127.0.0.1", control_port)) {
+    if (sock_control == nullptr || !sock_control->connect("127.0.0.1", control_port)) {
         return false;
     }
     printf("Opened JSBSim control socket\n");
-    sock_control.set_blocking(false);
+    sock_control->set_blocking(false);
     opened_control_socket = true;
 
     char startup[] =
         "info\n"
         "resume\n"
-        "iterate 1\n"
         "set atmosphere/turb-type 4\n";
-    sock_control.send(startup, strlen(startup));
+    sock_control->send(startup, strlen(startup));
     return true;
 }
 
@@ -345,12 +357,12 @@ bool JSBSim::open_fdm_socket(void)
     if (opened_fdm_socket) {
         return true;
     }
-    if (!sock_fgfdm.bind("127.0.0.1", fdm_port)) {
+    if (sock_fgfdm == nullptr || !sock_fgfdm->bind("127.0.0.1", fdm_port)) {
         check_stdout();
         return false;
     }
-    sock_fgfdm.set_blocking(false);
-    sock_fgfdm.reuseaddress();
+    sock_fgfdm->set_blocking(false);
+    sock_fgfdm->reuseaddress();
     opened_fdm_socket = true;
     return true;
 }
@@ -384,6 +396,7 @@ void JSBSim::send_servos(const struct sitl_input &input)
     }
     float wind_speed_fps = input.wind.speed / FEET_TO_METERS;
     int rato_running = (rato_throttle > 0.0f) ? 1 : 0;
+
     asprintf(&buf,
              "set fcs/aileron-cmd-norm %f\n"
              "set fcs/elevator-cmd-norm %f\n"
@@ -404,7 +417,7 @@ void JSBSim::send_servos(const struct sitl_input &input)
               wind_speed_fps/3,
               input.wind.turbulence);
     ssize_t buflen = strlen(buf);
-    ssize_t sent = sock_control.send(buf, buflen);
+    ssize_t sent = sock_control->send(buf, buflen);
     free(buf);
     if (sent < 0) {
         if (errno != EAGAIN) {
@@ -448,12 +461,12 @@ void JSBSim::recv_fdm(const struct sitl_input &input)
     check_stdout();
 
     do {
-        while (sock_fgfdm.recv(&fdm, sizeof(fdm), 100) != sizeof(fdm)) {
+        while (sock_fgfdm->recv(&fdm, sizeof(fdm), 100) != sizeof(fdm)) {
             send_servos(input);
             check_stdout();
         }
         fdm.ByteSwap();
-    } while (fdm.cur_time == time_now_us);
+    } while (fdm.cur_time == last_raw_jsbsim_time_us);
 
     accel_body = Vector3f(fdm.A_X_pilot, fdm.A_Y_pilot, fdm.A_Z_pilot) * FEET_TO_METERS;
 
@@ -471,53 +484,29 @@ void JSBSim::recv_fdm(const struct sitl_input &input)
         Location::AltFrame::ABSOLUTE
     };
 
-    float corrected_psi = fdm.psi;
-    if (sr75_yaw_offset_pending) {
-        sr75_yaw_offset_rad = wrap_PI(sr75_desired_heading_rad - fdm.psi);
-        sr75_yaw_offset_active = true;
-        sr75_yaw_offset_pending = false;
-        sr75_yaw_offset_debug_sent = false;
-        GCS_SEND_TEXT(MAV_SEVERITY_INFO,
-                      "JSBSim: SR75 fdm psi %.1f deg offset %.1f deg",
-                      (double)degrees(fdm.psi),
-                      (double)degrees(sr75_yaw_offset_rad));
-    }
-
-    if (sr75_yaw_offset_active) {
-        corrected_psi = wrap_PI(fdm.psi + sr75_yaw_offset_rad);
-
-        const float c = cosf(sr75_yaw_offset_rad);
-        const float s = sinf(sr75_yaw_offset_rad);
-        const float vn = velocity_ef.x;
-        const float ve = velocity_ef.y;
-        velocity_ef.x = c * vn - s * ve;
-        velocity_ef.y = s * vn + c * ve;
-    }
-
-    dcm.from_euler(fdm.phi, fdm.theta, corrected_psi);
-
-    if (sr75_yaw_offset_active && !sr75_yaw_offset_debug_sent) {
-        float roll;
-        float pitch;
-        float yaw;
-        dcm.to_euler(&roll, &pitch, &yaw);
-        GCS_SEND_TEXT(MAV_SEVERITY_INFO,
-                      "JSBSim: SR75 corrected psi %.1f deg dcm yaw %.1f deg",
-                      (double)wrap_360(degrees(corrected_psi)),
-                      (double)wrap_360(degrees(yaw)));
-        sr75_yaw_offset_debug_sent = true;
-    }
+    dcm.from_euler(fdm.phi, fdm.theta, fdm.psi);
 
     airspeed = fdm.vcas * KNOTS_TO_METERS_PER_SECOND;
     airspeed_pitot = airspeed;
 
     // update magnetic field
     update_mag_field_bf();
-    
+
     rpm[0] = fdm.rpm[0];
     rpm[1] = fdm.rpm[1];
-    
-    time_now_us = fdm.cur_time;
+
+    // Maintain monotonic ArduPilot clock across JSBSim resets.
+    // After reset, fdm.cur_time drops to near zero while time_now_us is large.
+    const uint64_t raw_us = (uint64_t)fdm.cur_time;
+    if (raw_us + 100000ULL < last_raw_jsbsim_time_us) {
+        jsbsim_time_offset_us = time_now_us - raw_us + 1000ULL;
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                      "JSBSim: time reset handled, offset +%llu us",
+                      (unsigned long long)jsbsim_time_offset_us);
+    }
+    last_raw_jsbsim_time_us = raw_us;
+    time_now_us = raw_us + jsbsim_time_offset_us;
+
 }
 
 void JSBSim::drain_control_socket()
@@ -526,22 +515,18 @@ void JSBSim::drain_control_socket()
     char buf[buflen];
     ssize_t received;
     do {
-        received = sock_control.recv(buf, buflen, 0);
+        received = sock_control->recv(buf, buflen, 0);
     } while (received > 0);
 }
 
-bool JSBSim::align_heading_to_mission_wp_runtime()
+bool JSBSim::update_sr75_launch_heading_from_mission()
 {
 #if AP_MISSION_ENABLED
-    if (mission_heading_aligned_runtime) {
-        return true;
-    }
-
-    if (!align_initial_heading_to_mission_wp) {
+    if (!sr75_mission_heading_enabled) {
         return false;
     }
 
-    if (!home_is_set || !on_ground()) {
+    if (hal.util->get_soft_armed() || !home_is_set || !on_ground()) {
         return false;
     }
 
@@ -556,37 +541,40 @@ bool JSBSim::align_heading_to_mission_wp_runtime()
         return false;
     }
 
-    const float heading_deg = wrap_360(home.get_bearing_to(wp) * 0.01f);
-    const float heading_rad = radians(heading_deg);
-
-    float roll;
-    float pitch;
-    dcm.to_euler(&roll, &pitch, nullptr);
-
-    home_yaw = heading_deg;
-    dcm.from_euler(roll, pitch, heading_rad);
-
-    if (sitl != nullptr) {
-        sitl->opos.hdg.set(heading_deg);
+    AP_Mission *mission = AP::mission();
+    if (mission == nullptr) {
+        return false;
     }
 
-    sr75_desired_heading_rad = heading_rad;
-    sr75_yaw_offset_pending = true;
+    const float heading_deg = wrap_360(home.get_bearing_to(wp) * 0.01f);
+    uint32_t mission_hash = 2166136261U;
+    mission_hash = (mission_hash ^ mission->num_commands()) * 16777619U;
+    mission_hash = (mission_hash ^ uint32_t(wp.lat)) * 16777619U;
+    mission_hash = (mission_hash ^ uint32_t(wp.lng)) * 16777619U;
+    mission_hash = (mission_hash ^ uint32_t(wp.alt)) * 16777619U;
+    if (mission_hash == 0) {
+        mission_hash = 1;
+    }
+
+    if (mission_hash == sr75_last_mission_hash) {
+        return false;
+    }
+
+    sr75_last_mission_hash = mission_hash;
+
+    if (fabsf(wrap_180(heading_deg - sr75_launch_heading_deg)) <= 1.0f) {
+        return false;
+    }
+
+    sr75_launch_heading_deg = heading_deg;
+    sr75_restart_pending = true;
 
     GCS_SEND_TEXT(MAV_SEVERITY_INFO,
-                  "JSBSim: SR75 desired mission heading %.1f deg %.3f rad",
-                  (double)heading_deg,
-                  (double)heading_rad);
-
-    send_jsbsim_heading_command(heading_deg);
-    AP::ahrs().request_yaw_reset();
-
-    mission_heading_aligned_runtime = true;
-    initial_heading_aligned_to_mission_wp = true;
-
+                  "SR75: launch heading set from mission %.1f deg",
+                  (double)sr75_launch_heading_deg);
     GCS_SEND_TEXT(MAV_SEVERITY_INFO,
-                  "JSBSim: SR75 heading aligned to first mission WP %.1f deg",
-                  heading_deg);
+                  "SR75: mission heading changed %.1f deg, restarting JSBSim",
+                  (double)sr75_launch_heading_deg);
 
     return true;
 #else
@@ -594,28 +582,64 @@ bool JSBSim::align_heading_to_mission_wp_runtime()
 #endif
 }
 
-void JSBSim::send_jsbsim_heading_command(float heading_deg)
+void JSBSim::reset_sockets()
 {
-    char *buf = nullptr;
-    const float heading_rad = radians(heading_deg);
+    if (sock_control != nullptr) {
+        sock_control->close();
+    }
+    if (sock_fgfdm != nullptr) {
+        sock_fgfdm->close();
+    }
+    delete sock_control;
+    delete sock_fgfdm;
+    sock_control = NEW_NOTHROW SocketAPM_native(false);
+    sock_fgfdm = NEW_NOTHROW SocketAPM_native(true);
+    if (sock_control == nullptr || sock_fgfdm == nullptr) {
+        AP_HAL::panic("Unable to recreate JSBSim sockets");
+    }
+}
 
-    const int ret = asprintf(&buf,
-                             "hold\n"
-                             "set attitude/psi-rad %.8f\n"
-                             "resume\n"
-                             "iterate 1\n",
-                             (double)heading_rad);
-
-    if (ret <= 0 || buf == nullptr) {
-        return;
+void JSBSim::restart_JSBSim()
+{
+    if (jsbsim_pid > 0) {
+        kill(jsbsim_pid, SIGTERM);
+        for (uint8_t i = 0; i < 50; i++) {
+            const pid_t ret = waitpid(jsbsim_pid, nullptr, WNOHANG);
+            if (ret == jsbsim_pid || (ret == -1 && errno == ECHILD)) {
+                jsbsim_pid = -1;
+                break;
+            }
+            usleep(10000);
+        }
+        if (jsbsim_pid > 0) {
+            kill(jsbsim_pid, SIGKILL);
+            waitpid(jsbsim_pid, nullptr, 0);
+            jsbsim_pid = -1;
+        }
     }
 
-    GCS_SEND_TEXT(MAV_SEVERITY_INFO,
-                  "JSBSim: SR75 sent psi-rad %.3f",
-                  (double)heading_rad);
+    if (jsbsim_stdout >= 0) {
+        close(jsbsim_stdout);
+        jsbsim_stdout = -1;
+    }
 
-    sock_control.send(buf, strlen(buf));
-    free(buf);
+    reset_sockets();
+
+    if (jsbsim_script != nullptr) {
+        free(jsbsim_script);
+        jsbsim_script = nullptr;
+    }
+    if (jsbsim_fgout != nullptr) {
+        free(jsbsim_fgout);
+        jsbsim_fgout = nullptr;
+    }
+
+    created_templates = false;
+    started_jsbsim = false;
+    opened_control_socket = false;
+    opened_fdm_socket = false;
+    initialised = false;
+    sr75_restart_complete_msg_pending = true;
 }
 
 /*
@@ -632,10 +656,25 @@ void JSBSim::update(const struct sitl_input &input)
             return;
         }
         initialised = true;
+        if (sr75_restart_complete_msg_pending) {
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                          "SR75: JSBSim restarted with heading %.1f deg",
+                          (double)sr75_launch_heading_deg);
+            sr75_restart_complete_msg_pending = false;
+        }
     }
 
     if (initialised && opened_control_socket && opened_fdm_socket) {
-        align_heading_to_mission_wp_runtime();
+        update_sr75_launch_heading_from_mission();
+    }
+
+    if (sr75_restart_pending && !hal.util->get_soft_armed()) {
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                      "SR75: restarting JSBSim for mission heading %.1f deg",
+                      (double)sr75_launch_heading_deg);
+        restart_JSBSim();
+        sr75_restart_pending = false;
+        return;
     }
 
     send_servos(input);

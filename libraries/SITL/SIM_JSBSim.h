@@ -22,6 +22,8 @@
 
 #if AP_SIM_JSBSIM_ENABLED
 
+#include <sys/types.h>
+
 #include <AP_HAL/utility/Socket_native.h>
 
 #include "SIM_Aircraft.h"
@@ -45,10 +47,10 @@ public:
 
 private:
     // tcp input control socket to JSBSIm
-    SocketAPM_native sock_control;
+    SocketAPM_native *sock_control;
 
     // UDP packets from JSBSim in fgFDM format
-    SocketAPM_native sock_fgfdm;
+    SocketAPM_native *sock_fgfdm;
 
     bool initialised;
 
@@ -66,16 +68,20 @@ private:
     bool opened_control_socket;
     bool opened_fdm_socket;
 
-    bool mission_heading_aligned_runtime;
-    bool sr75_yaw_offset_pending;
-    bool sr75_yaw_offset_active;
-    bool sr75_yaw_offset_debug_sent;
+    bool sr75_mission_heading_enabled;
+    float sr75_launch_heading_deg;
+    bool sr75_restart_pending;
+    bool sr75_restart_complete_msg_pending;
+    uint32_t sr75_last_mission_hash;
     uint32_t last_heading_align_check_ms;
-    float sr75_desired_heading_rad;
-    float sr75_yaw_offset_rad;
+    uint64_t jsbsim_time_offset_us;
+    uint64_t last_raw_jsbsim_time_us;
 
-    bool align_heading_to_mission_wp_runtime();
-    void send_jsbsim_heading_command(float heading_deg);
+    pid_t jsbsim_pid;
+
+    bool update_sr75_launch_heading_from_mission();
+    void restart_JSBSim();
+    void reset_sockets();
 
     enum {
         FRAME_NORMAL,
