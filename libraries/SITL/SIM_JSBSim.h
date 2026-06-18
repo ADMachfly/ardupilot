@@ -25,6 +25,7 @@
 #include <sys/types.h>
 
 #include <AP_HAL/utility/Socket_native.h>
+#include <AP_Param/AP_Param.h>
 
 #include "SIM_Aircraft.h"
 
@@ -68,6 +69,7 @@ private:
     bool opened_control_socket;
     bool opened_fdm_socket;
 
+    bool sr75_model;
     bool sr75_mission_heading_enabled;
     float sr75_launch_heading_deg;
     bool sr75_restart_pending;
@@ -79,7 +81,22 @@ private:
 
     pid_t jsbsim_pid;
 
+    AP_Float *sr75_rato_thrust_param;
+    AP_Int8 *sr75_rato_enable_param;
+    AP_Int8 *sr75_rato_ign_chan_param;
+    uint32_t sr75_rato_last_debug_ms;
+    bool sr75_rato_params_checked;
+    bool sr75_rato_param_warning_sent;
+    bool sr75_rato_ign_chan_warning_sent;
+    bool sr75_rato_property_active_sent;
+
     bool update_sr75_launch_heading_from_mission();
+    void update_sr75_rato_params();
+    void sr75_rato_bridge(const struct sitl_input &input,
+                          float &rato_cmd_norm,
+                          int &rato_running,
+                          float &rato_thrust_n,
+                          float &rato_thrust_lbf);
     void restart_JSBSim();
     void reset_sockets();
 

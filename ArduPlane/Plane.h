@@ -994,6 +994,7 @@ private:
     bool start_command(const AP_Mission::Mission_Command& cmd);
     bool verify_command(const AP_Mission::Mission_Command& cmd);
     void do_takeoff(const AP_Mission::Mission_Command& cmd);
+    bool sr75_mission_takeoff_heading(float &takeoff_course_deg) const;
     void do_nav_wp(const AP_Mission::Mission_Command& cmd);
     void do_land(const AP_Mission::Mission_Command& cmd);
 #if HAL_QUADPLANE_ENABLED

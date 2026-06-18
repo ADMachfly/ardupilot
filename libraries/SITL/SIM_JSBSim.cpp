@@ -57,6 +57,7 @@ JSBSim::JSBSim(const char *frame_str) :
     started_jsbsim(false),
     opened_control_socket(false),
     opened_fdm_socket(false),
+    sr75_model(false),
     sr75_mission_heading_enabled(false),
     sr75_launch_heading_deg(0.0f),
     sr75_restart_pending(false),
@@ -66,6 +67,14 @@ JSBSim::JSBSim(const char *frame_str) :
     jsbsim_time_offset_us(0),
     last_raw_jsbsim_time_us(0),
     jsbsim_pid(-1),
+    sr75_rato_thrust_param(nullptr),
+    sr75_rato_enable_param(nullptr),
+    sr75_rato_ign_chan_param(nullptr),
+    sr75_rato_last_debug_ms(0),
+    sr75_rato_params_checked(false),
+    sr75_rato_param_warning_sent(false),
+    sr75_rato_ign_chan_warning_sent(false),
+    sr75_rato_property_active_sent(false),
     frame(FRAME_NORMAL)
 {
     sr75_mission_heading_enabled = align_initial_heading_to_mission_wp;
@@ -82,6 +91,7 @@ JSBSim::JSBSim(const char *frame_str) :
     if (model_name != nullptr) {
         jsbsim_model = model_name + 1;
     }
+    sr75_model = strstr(jsbsim_model, "sr_75_6_dof") != nullptr;
 }
 
 /*
@@ -133,8 +143,11 @@ bool JSBSim::create_templates(void)
 "\n"
 "    <event name=\"start engine\">\n"
 "      <condition> simulation/sim-time-sec le 0.01 </condition>\n"
+"      <set name=\"fcs/rato-throttle-cmd-norm\" value=\"0\"/>\n"
+"      <set name=\"fcs/throttle-cmd-norm[2]\" value=\"0\"/>\n"
 "      <set name=\"propulsion/engine[0]/set-running\" value=\"1\"/>\n"
 "      <set name=\"propulsion/engine[1]/set-running\" value=\"1\"/>\n"
+"      <set name=\"propulsion/engine[2]/set-running\" value=\"1\"/>\n"
 "      <notify/>\n"
 "    </event>\n"
 "\n",
@@ -367,6 +380,87 @@ bool JSBSim::open_fdm_socket(void)
     return true;
 }
 
+void JSBSim::update_sr75_rato_params()
+{
+    if (sr75_rato_params_checked) {
+        return;
+    }
+
+    enum ap_var_type ptype;
+    AP_Param *thrust_param = AP_Param::find("RATO_THR_N", &ptype);
+    if (thrust_param != nullptr && ptype == AP_PARAM_FLOAT) {
+        sr75_rato_thrust_param = (AP_Float *)thrust_param;
+    }
+
+    AP_Param *enable_param = AP_Param::find("RATO_ENABLE", &ptype);
+    if (enable_param != nullptr && ptype == AP_PARAM_INT8) {
+        sr75_rato_enable_param = (AP_Int8 *)enable_param;
+    }
+
+    AP_Param *ign_chan_param = AP_Param::find("RATO_IGN_CH", &ptype);
+    if (ign_chan_param != nullptr && ptype == AP_PARAM_INT8) {
+        sr75_rato_ign_chan_param = (AP_Int8 *)ign_chan_param;
+    }
+
+    sr75_rato_params_checked = true;
+}
+
+void JSBSim::sr75_rato_bridge(const struct sitl_input &input,
+                              float &rato_cmd_norm,
+                              int &rato_running,
+                              float &rato_thrust_n,
+                              float &rato_thrust_lbf)
+{
+    constexpr float sr75_nominal_rato_thrust_n = 5800.0f;
+    constexpr float newton_to_lbf = 0.224808943f;
+
+    update_sr75_rato_params();
+
+    const bool enabled = sr75_rato_enable_param == nullptr || sr75_rato_enable_param->get() > 0;
+    const int ign_chan = sr75_rato_ign_chan_param == nullptr ? 0 : sr75_rato_ign_chan_param->get();
+    uint16_t rato_pwm = 0;
+    if (ign_chan > 0 && ign_chan <= int(ARRAY_SIZE(input.servos))) {
+        rato_pwm = input.servos[ign_chan - 1];
+    } else if (ign_chan != 0 && !sr75_rato_ign_chan_warning_sent) {
+        GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
+                      "SR75 RATO bridge: invalid RATO_IGN_CH %d",
+                      (int)ign_chan);
+        sr75_rato_ign_chan_warning_sent = true;
+    }
+    const float active_cmd = rato_pwm == 0 ? 0.0f : constrain_float((rato_pwm - 1000) * 0.001f, 0.0f, 1.0f);
+
+    rato_thrust_n = sr75_rato_thrust_param == nullptr ? sr75_nominal_rato_thrust_n : MAX(sr75_rato_thrust_param->get(), 0.0f);
+    rato_thrust_lbf = rato_thrust_n * newton_to_lbf;
+    rato_cmd_norm = enabled ? active_cmd * (rato_thrust_n / sr75_nominal_rato_thrust_n) : 0.0f;
+    rato_running = rato_cmd_norm > 0.0f ? 1 : 0;
+
+    if (active_cmd > 0.0f && sr75_rato_thrust_param == nullptr && !sr75_rato_param_warning_sent) {
+        GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
+                      "SR75 RATO bridge: RATO_THR_N missing, using 5800 N");
+        sr75_rato_param_warning_sent = true;
+    }
+
+    if (rato_running != 0 && !sr75_rato_property_active_sent) {
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "SR75 RATO JSBSim property active");
+        sr75_rato_property_active_sent = true;
+    }
+
+    const uint32_t now_ms = AP_HAL::millis();
+    if (rato_running != 0 && now_ms - sr75_rato_last_debug_ms >= 1000) {
+        sr75_rato_last_debug_ms = now_ms;
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                      "SR75 RATO bridge: enable=%d ign_ch=%d pwm=%u cmd=%.2f",
+                      enabled ? 1 : 0,
+                      (int)ign_chan,
+                      (unsigned)rato_pwm,
+                      (double)rato_cmd_norm);
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                      "SR75 RATO bridge: thrust=%.0f N %.0f lbf",
+                      (double)rato_thrust_n,
+                      (double)rato_thrust_lbf);
+    }
+}
+
 
 /*
   decode and send servos
@@ -377,8 +471,17 @@ void JSBSim::send_servos(const struct sitl_input &input)
     float aileron  = filtered_servo_angle(input, 0);
     float elevator = filtered_servo_angle(input, 1);
     float throttle = filtered_servo_range(input, 2);
-    float rato_throttle = filtered_servo_range(input, 6);
+    float rato_throttle = 0.0f;
+    int rato_running = 0;
+    float rato_thrust_n = 0.0f;
+    float rato_thrust_lbf = 0.0f;
     float rudder   = filtered_servo_angle(input, 3);
+    if (sr75_model) {
+        sr75_rato_bridge(input, rato_throttle, rato_running, rato_thrust_n, rato_thrust_lbf);
+    } else {
+        rato_throttle = filtered_servo_range(input, 6);
+        rato_running = rato_throttle > 0.0f ? 1 : 0;
+    }
     if (frame == FRAME_ELEVON) {
         // fake an elevon plane
         float ch1 = aileron;
@@ -395,7 +498,6 @@ void JSBSim::send_servos(const struct sitl_input &input)
         rudder   = (ch2+ch1)/2.0f;
     }
     float wind_speed_fps = input.wind.speed / FEET_TO_METERS;
-    int rato_running = (rato_throttle > 0.0f) ? 1 : 0;
 
     asprintf(&buf,
              "set fcs/aileron-cmd-norm %f\n"
@@ -403,7 +505,7 @@ void JSBSim::send_servos(const struct sitl_input &input)
              "set fcs/rudder-cmd-norm %f\n"
              "set fcs/throttle-cmd-norm %f\n"
              "set fcs/rato-throttle-cmd-norm %f\n"
-             "set propulsion/engine[2]/set-running %d\n"
+             "set fcs/throttle-cmd-norm[2] %f\n"
              "set atmosphere/psiw-rad %f\n"
              "set atmosphere/wind-mag-fps %f\n"
              "set atmosphere/turbulence/milspec/windspeed_at_20ft_AGL-fps %f\n"
@@ -411,7 +513,7 @@ void JSBSim::send_servos(const struct sitl_input &input)
              "iterate 1\n",
               aileron, elevator, rudder, throttle,
               rato_throttle,
-              rato_running,
+              rato_throttle,
               radians(input.wind.direction),
               wind_speed_fps,
               wind_speed_fps/3,
