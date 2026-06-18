@@ -29,6 +29,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#include <AP_AHRS/AP_AHRS.h>
 #include <AP_HAL/AP_HAL.h>
 
 extern const AP_HAL::HAL& hal;
@@ -42,15 +43,25 @@ namespace SITL {
 
 JSBSim::JSBSim(const char *frame_str) :
     Aircraft(frame_str),
-    sock_control(false),
-    sock_fgfdm(true),
+    sock_control(false),   // TCP control socket to JSBSim
+    sock_fgfdm(true),      // UDP FDM packets from JSBSim
     initialised(false),
+    control_port(0),
+    fdm_port(0),
     jsbsim_script(nullptr),
     jsbsim_fgout(nullptr),
+    jsbsim_stdout(-1),
     created_templates(false),
     started_jsbsim(false),
     opened_control_socket(false),
     opened_fdm_socket(false),
+    mission_heading_aligned_runtime(false),
+    sr75_yaw_offset_pending(false),
+    sr75_yaw_offset_active(false),
+    sr75_yaw_offset_debug_sent(false),
+    last_heading_align_check_ms(0),
+    sr75_desired_heading_rad(0.0f),
+    sr75_yaw_offset_rad(0.0f),
     frame(FRAME_NORMAL)
 {
     if (strstr(frame_str, "elevon")) {
@@ -459,7 +470,44 @@ void JSBSim::recv_fdm(const struct sitl_input &input)
         int32_t(fdm.agl*100 + home.alt),
         Location::AltFrame::ABSOLUTE
     };
-    dcm.from_euler(fdm.phi, fdm.theta, fdm.psi);
+
+    float corrected_psi = fdm.psi;
+    if (sr75_yaw_offset_pending) {
+        sr75_yaw_offset_rad = wrap_PI(sr75_desired_heading_rad - fdm.psi);
+        sr75_yaw_offset_active = true;
+        sr75_yaw_offset_pending = false;
+        sr75_yaw_offset_debug_sent = false;
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                      "JSBSim: SR75 fdm psi %.1f deg offset %.1f deg",
+                      (double)degrees(fdm.psi),
+                      (double)degrees(sr75_yaw_offset_rad));
+    }
+
+    if (sr75_yaw_offset_active) {
+        corrected_psi = wrap_PI(fdm.psi + sr75_yaw_offset_rad);
+
+        const float c = cosf(sr75_yaw_offset_rad);
+        const float s = sinf(sr75_yaw_offset_rad);
+        const float vn = velocity_ef.x;
+        const float ve = velocity_ef.y;
+        velocity_ef.x = c * vn - s * ve;
+        velocity_ef.y = s * vn + c * ve;
+    }
+
+    dcm.from_euler(fdm.phi, fdm.theta, corrected_psi);
+
+    if (sr75_yaw_offset_active && !sr75_yaw_offset_debug_sent) {
+        float roll;
+        float pitch;
+        float yaw;
+        dcm.to_euler(&roll, &pitch, &yaw);
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                      "JSBSim: SR75 corrected psi %.1f deg dcm yaw %.1f deg",
+                      (double)wrap_360(degrees(corrected_psi)),
+                      (double)wrap_360(degrees(yaw)));
+        sr75_yaw_offset_debug_sent = true;
+    }
+
     airspeed = fdm.vcas * KNOTS_TO_METERS_PER_SECOND;
     airspeed_pitot = airspeed;
 
@@ -481,6 +529,95 @@ void JSBSim::drain_control_socket()
         received = sock_control.recv(buf, buflen, 0);
     } while (received > 0);
 }
+
+bool JSBSim::align_heading_to_mission_wp_runtime()
+{
+#if AP_MISSION_ENABLED
+    if (mission_heading_aligned_runtime) {
+        return true;
+    }
+
+    if (!align_initial_heading_to_mission_wp) {
+        return false;
+    }
+
+    if (!home_is_set || !on_ground()) {
+        return false;
+    }
+
+    const uint32_t now_ms = AP_HAL::millis();
+    if (now_ms - last_heading_align_check_ms < 500) {
+        return false;
+    }
+    last_heading_align_check_ms = now_ms;
+
+    Location wp;
+    if (!find_first_real_mission_waypoint(wp)) {
+        return false;
+    }
+
+    const float heading_deg = wrap_360(home.get_bearing_to(wp) * 0.01f);
+    const float heading_rad = radians(heading_deg);
+
+    float roll;
+    float pitch;
+    dcm.to_euler(&roll, &pitch, nullptr);
+
+    home_yaw = heading_deg;
+    dcm.from_euler(roll, pitch, heading_rad);
+
+    if (sitl != nullptr) {
+        sitl->opos.hdg.set(heading_deg);
+    }
+
+    sr75_desired_heading_rad = heading_rad;
+    sr75_yaw_offset_pending = true;
+
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                  "JSBSim: SR75 desired mission heading %.1f deg %.3f rad",
+                  (double)heading_deg,
+                  (double)heading_rad);
+
+    send_jsbsim_heading_command(heading_deg);
+    AP::ahrs().request_yaw_reset();
+
+    mission_heading_aligned_runtime = true;
+    initial_heading_aligned_to_mission_wp = true;
+
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                  "JSBSim: SR75 heading aligned to first mission WP %.1f deg",
+                  heading_deg);
+
+    return true;
+#else
+    return false;
+#endif
+}
+
+void JSBSim::send_jsbsim_heading_command(float heading_deg)
+{
+    char *buf = nullptr;
+    const float heading_rad = radians(heading_deg);
+
+    const int ret = asprintf(&buf,
+                             "hold\n"
+                             "set attitude/psi-rad %.8f\n"
+                             "resume\n"
+                             "iterate 1\n",
+                             (double)heading_rad);
+
+    if (ret <= 0 || buf == nullptr) {
+        return;
+    }
+
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                  "JSBSim: SR75 sent psi-rad %.3f",
+                  (double)heading_rad);
+
+    sock_control.send(buf, strlen(buf));
+    free(buf);
+}
+
 /*
   update the JSBSim simulation by one time step
  */
@@ -496,6 +633,11 @@ void JSBSim::update(const struct sitl_input &input)
         }
         initialised = true;
     }
+
+    if (initialised && opened_control_socket && opened_fdm_socket) {
+        align_heading_to_mission_wp_runtime();
+    }
+
     send_servos(input);
     recv_fdm(input);
     adjust_frame_time(rate_hz);

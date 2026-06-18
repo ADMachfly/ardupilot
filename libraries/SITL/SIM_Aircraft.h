@@ -384,10 +384,10 @@ protected:
         bool grab_attempted;  // avoid warning multiple times about missed grab
     } clamp;
     void update_initial_heading_to_mission_wp();
-bool find_first_real_mission_waypoint(Location &wp) const;
+    bool find_first_real_mission_waypoint(Location &wp) const;
 
-bool align_initial_heading_to_mission_wp;
-bool initial_heading_aligned_to_mission_wp;
+    bool align_initial_heading_to_mission_wp;
+    bool initial_heading_aligned_to_mission_wp;
     private:
     uint64_t last_time_us;
     uint32_t frame_counter;

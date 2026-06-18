@@ -79,7 +79,10 @@ Aircraft::Aircraft(const char *frame_str)
         rangefinder_m[i] = nanf("");
     }
 
-    align_initial_heading_to_mission_wp = frame_str != nullptr && strstr(frame_str, "sr75") != nullptr;
+    align_initial_heading_to_mission_wp =
+        frame_str != nullptr &&
+        (strstr(frame_str, "sr75") != nullptr ||
+         strstr(frame_str, "sr_75") != nullptr);
     initial_heading_aligned_to_mission_wp = false;
 }
 

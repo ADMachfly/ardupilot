@@ -649,16 +649,28 @@ bool Plane::verify_takeoff()
         // course. This keeps wings level until we are ready to
         // rotate, and also allows us to cope with arbitrary
         // compass errors for auto takeoff
-        if (gps.status() >= AP_GPS_FixType::FIX_3D && 
+        if (gps.status() >= AP_GPS_FixType::FIX_3D &&
             gps.ground_speed() > GPS_GND_CRS_MIN_SPD &&
             hal.util->safety_switch_state() != AP_HAL::Util::SAFETY_DISARMED) {
-            float takeoff_course = wrap_PI(radians(gps.ground_course())) - steer_state.locked_course_err;
-            takeoff_course = wrap_PI(takeoff_course);
-            steer_state.hold_course_cd = wrap_360_cd(degrees(takeoff_course)*100);
-            gcs().send_text(MAV_SEVERITY_INFO, "Holding course %d at %.1fm/s (%.1f)",
-                              (int)steer_state.hold_course_cd,
-                              (double)gps.ground_speed(),
-                              (double)degrees(steer_state.locked_course_err));
+            float takeoff_course_deg;
+            if (sr75_mission_takeoff_heading(takeoff_course_deg)) {
+                steer_state.hold_course_cd = wrap_360_cd(takeoff_course_deg * 100);
+
+                gcs().send_text(MAV_SEVERITY_INFO,
+                                "SR75: Holding mission takeoff course %.1f deg",
+                                (double)takeoff_course_deg);
+            } else {
+                takeoff_course_deg = gps.ground_course();
+                float takeoff_course = wrap_PI(radians(takeoff_course_deg)) - steer_state.locked_course_err;
+                takeoff_course = wrap_PI(takeoff_course);
+                steer_state.hold_course_cd = wrap_360_cd(degrees(takeoff_course) * 100);
+
+                gcs().send_text(MAV_SEVERITY_INFO,
+                                "Holding course %d at %.1fm/s (%.1f)",
+                                (int)steer_state.hold_course_cd,
+                                (double)gps.ground_speed(),
+                                (double)degrees(steer_state.locked_course_err));
+            }
         }
     }
 
@@ -697,6 +709,43 @@ bool Plane::verify_takeoff()
     } else {
         return false;
     }
+}
+
+bool Plane::sr75_mission_takeoff_heading(float &takeoff_course_deg) const
+{
+#if AP_MISSION_ENABLED
+    if (g2.rato.enable.get() <= 0 || mission.num_commands() < 2) {
+        return false;
+    }
+
+    for (uint16_t i = 1; i < mission.num_commands(); i++) {
+        AP_Mission::Mission_Command sr75_cmd;
+
+        if (!mission.read_cmd_from_storage(i, sr75_cmd)) {
+            continue;
+        }
+
+        switch (sr75_cmd.id) {
+        case MAV_CMD_NAV_TAKEOFF:
+        case MAV_CMD_DO_CHANGE_SPEED:
+        case MAV_CMD_NAV_DELAY:
+        case MAV_CMD_CONDITION_DELAY:
+        case MAV_CMD_CONDITION_DISTANCE:
+            continue;
+
+        case MAV_CMD_NAV_WAYPOINT:
+            if (sr75_cmd.content.location.initialised()) {
+                takeoff_course_deg = wrap_360(current_loc.get_bearing_to(sr75_cmd.content.location) * 0.01f);
+                return true;
+            }
+            break;
+
+        default:
+            continue;
+        }
+    }
+#endif
+    return false;
 }
 
 /*
@@ -1416,4 +1465,3 @@ bool Plane::in_auto_mission_id(uint16_t command) const
 {
     return control_mode == &mode_auto && mission.get_current_nav_id() == command;
 }
-

@@ -66,6 +66,17 @@ private:
     bool opened_control_socket;
     bool opened_fdm_socket;
 
+    bool mission_heading_aligned_runtime;
+    bool sr75_yaw_offset_pending;
+    bool sr75_yaw_offset_active;
+    bool sr75_yaw_offset_debug_sent;
+    uint32_t last_heading_align_check_ms;
+    float sr75_desired_heading_rad;
+    float sr75_yaw_offset_rad;
+
+    bool align_heading_to_mission_wp_runtime();
+    void send_jsbsim_heading_command(float heading_deg);
+
     enum {
         FRAME_NORMAL,
         FRAME_ELEVON,
