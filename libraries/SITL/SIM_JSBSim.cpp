@@ -506,12 +506,14 @@ void JSBSim::send_servos(const struct sitl_input &input)
              "set fcs/throttle-cmd-norm %f\n"
              "set fcs/rato-throttle-cmd-norm %f\n"
              "set fcs/throttle-cmd-norm[2] %f\n"
+             "set fcs/throttle-pos-norm[2] %f\n"
              "set atmosphere/psiw-rad %f\n"
              "set atmosphere/wind-mag-fps %f\n"
              "set atmosphere/turbulence/milspec/windspeed_at_20ft_AGL-fps %f\n"
              "set atmosphere/turbulence/milspec/severity %f\n"
              "iterate 1\n",
               aileron, elevator, rudder, throttle,
+              rato_throttle,
               rato_throttle,
               rato_throttle,
               radians(input.wind.direction),

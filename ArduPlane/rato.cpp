@@ -102,7 +102,7 @@ const AP_Param::GroupInfo RATOController::var_info[] = {
     // @Description: Maximum allowed time in RATO takeoff logic before timeout handling. If the release envelope is not reached within this time, RATO logic can abort or fall back.
     // @Units: s
     // @User: Advanced    
-    AP_GROUPINFO("TMO_S", 11, RATOController, timeout_s, 8.0f),
+    AP_GROUPINFO("TMO_S", 11, RATOController, timeout_s, 15.0f),
 
     // @Param: IGN_CH
     // @DisplayName: RATO ignition channel
@@ -115,6 +115,22 @@ const AP_Param::GroupInfo RATOController::var_info[] = {
     // @Description: Servo or relay channel used to command RATO booster ejection after burn/release conditions are satisfied. Set to 0 to disable output command during testing.
     // @User: Advanced    
     AP_GROUPINFO("EJ_CH",  13, RATOController, eject_chan, 0),
+
+    // @Param: EJECT_S
+    // @DisplayName: RATO eject time
+    // @Description: Time after RATO launch before booster ejection when time-based release logic is used
+    // @Range: 7 15
+    // @Units: s
+    // @Increment: 0.1
+    // @User: Advanced
+    AP_GROUPINFO("EJECT_S", 14, RATOController, eject_time_s, 10.0f),
+
+    // @Param: REL_MODE
+    // @DisplayName: RATO release mode
+    // @Description: Selects whether RATO booster release uses the altitude distance speed envelope, the eject timer, or both requirements together
+    // @Values: 0:Envelope,1:Time,2:Hybrid
+    // @User: Advanced
+    AP_GROUPINFO("REL_MODE", 15, RATOController, release_mode, 1),
     AP_GROUPEND
 };
 
@@ -161,6 +177,13 @@ void RATOController::init(const Location& loc, float alt_m)
     last_dist_m = 0.0f;
     last_alt_gain_m = 0.0f;
     last_speed_mps = 0.0f;
+
+    if (timeout_s.get() > 0.0f && timeout_s.get() <= eject_time_s.get()) {
+        gcs().send_text(MAV_SEVERITY_WARNING,
+                        "RATO timeout %.1f <= eject %.1f",
+                        (double)timeout_s.get(),
+                        (double)eject_time_s.get());
+    }
      
     // Enter active state machine.    
     state = State::READY;
@@ -262,7 +285,7 @@ case State::READY:
         // Edits for the JSBSim test The fix makes it wait until release_envelope_met() returns true before moving to EJECT.
 
     case State::ENGINE_TAKEOVER:
-        if (release_envelope_met()) {
+        if (release_condition_met()) {
             state = State::EJECT;
         }
         return false;
@@ -303,6 +326,25 @@ bool RATOController::release_envelope_met() const
     return last_dist_m >= rel_dist.get() &&
            last_alt_gain_m >= rel_alt.get() &&
            last_speed_mps >= rel_spd.get();
+}
+
+bool RATOController::release_time_met() const
+{
+    return eject_time_s.get() > 0.0f && elapsed_s() >= eject_time_s.get();
+}
+
+bool RATOController::release_condition_met() const
+{
+    switch (ReleaseMode(release_mode.get())) {
+    case ReleaseMode::ENVELOPE:
+        return release_envelope_met();
+    case ReleaseMode::TIME:
+        return release_time_met();
+    case ReleaseMode::HYBRID:
+        return release_time_met() && release_envelope_met();
+    default:
+        return release_time_met();
+    }
 }
 
 

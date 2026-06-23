@@ -26,6 +26,12 @@ class RATOController {
 public:
     static const struct AP_Param::GroupInfo var_info[];
 
+    enum class ReleaseMode : uint8_t {
+        ENVELOPE = 0,
+        TIME = 1,
+        HYBRID = 2
+    };
+
 //    RATO state machine
 //    DISABLED        : RATO not active
     /*
@@ -76,6 +82,8 @@ public:
     AP_Float    rel_alt;            // RATO_REL_ALT  release altitude AGL [m]
     AP_Float    rel_dist;           // RATO_REL_DIST release ground distance [m]
     AP_Float    rel_spd;            // RATO_REL_SPD  release min speed [m/s]
+    AP_Float    eject_time_s;       // RATO_EJECT_S  time after launch before release [s]
+    AP_Int8     release_mode;       // RATO_REL_MODE release logic selection
     AP_Float    max_g;              // RATO_MAX_G    max allowed G-load
     AP_Float    min_g;              // RATO_MIN_G    min expected G during boost (abort if below)
     AP_Float    timeout_s;          // RATO_TIMEOUT  overall RATO phase timeout [s]
@@ -102,6 +110,8 @@ private:
     
     // Returns true when altitude + distance + speed release envelope is satisfied.
     bool release_envelope_met() const;
+    bool release_time_met() const;
+    bool release_condition_met() const;
 
     // Commands ignition servo/relay channel on or off.
     void set_ignition_output(bool on);    // ← ADD THIS LINE

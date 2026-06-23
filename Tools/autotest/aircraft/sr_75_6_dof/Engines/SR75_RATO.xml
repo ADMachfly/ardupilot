@@ -2,15 +2,16 @@
 <turbine_engine name="SR75_RATO_5p8kN">
 
   <!-- RATO placeholder for initial launch dynamics only. -->
-  <!-- Implemented as high-TSFC direct-thrust engine so the requested direct thruster can be used. -->
-  <!-- 5800 N is 1303.9 lbf. TSFC about 18.63 lb/hr/lbf consumes about 9.18 kg in 3 s. -->
+  <!-- Implemented as a direct-thrust placeholder that stays running from startup. -->
+  <!-- ArduPilot controls the burn window, so the placeholder must not consume propellant at idle. -->
   <milthrust unit="N">5800</milthrust>
   <maxthrust unit="N">5800</maxthrust>
 
   <bypassratio>0.0</bypassratio>
   <bleed>0.0</bleed>
-  <tsfc>18.63</tsfc>
-  <atsfc>18.63</atsfc>
+  <tsfc>0.0</tsfc>
+  <atsfc>0.0</atsfc>
+  <idlefuelflow unit="KG/MIN">0.0</idlefuelflow>
 
   <ignitionn1>5.0</ignitionn1>
   <ignitionn2>20.0</ignitionn2>
