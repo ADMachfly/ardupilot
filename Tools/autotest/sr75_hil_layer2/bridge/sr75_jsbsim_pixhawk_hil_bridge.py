@@ -9,6 +9,7 @@ logs Pixhawk outputs. It does not command JSBSim or any actuator hardware.
 
 import argparse
 import csv
+import math
 import os
 import signal
 import socket
@@ -26,6 +27,24 @@ MESSAGE_RATES_HZ = {
     "VFR_HUD": 5,
     "RC_CHANNELS": 5,
 }
+
+JSBSIM_FIELDS = [
+    ("jsb_time_s", "/fdm/jsbsim/simulation/sim-time-sec", 1.0),
+    ("jsb_lat_deg", "/fdm/jsbsim/position/lat-gc-deg", 1.0),
+    ("jsb_lon_deg", "/fdm/jsbsim/position/long-gc-deg", 1.0),
+    ("jsb_alt_m", "/fdm/jsbsim/position/h-sl-ft", 0.3048),
+    ("jsb_agl_m", "/fdm/jsbsim/position/h-agl-ft", 0.3048),
+    ("jsb_roll_rad", "/fdm/jsbsim/attitude/phi-deg", math.pi / 180.0),
+    ("jsb_pitch_rad", "/fdm/jsbsim/attitude/theta-rad", 1.0),
+    ("jsb_yaw_rad", "/fdm/jsbsim/attitude/psi-deg", math.pi / 180.0),
+    ("jsb_airspeed_mps", "/fdm/jsbsim/velocities/vt-fps", 0.3048),
+    ("jsb_alpha_rad", "/fdm/jsbsim/aero/alpha-rad", 1.0),
+]
+
+
+def blank_jsbsim_row():
+    return {field_name: "" for field_name, _column_name, _scale in JSBSIM_FIELDS}
+
 
 SAFETY_WARNING = """
 SR-75 LAYER 2 HIL BENCH SAFETY
@@ -71,6 +90,66 @@ def open_mp_in_socket(mp_in):
     return sock
 
 
+class JSBSimCSVMonitor:
+    def __init__(self, path):
+        self.path = path
+        self.headers = None
+
+    def blank_row(self):
+        return blank_jsbsim_row()
+
+    def _read_header(self):
+        try:
+            with open(self.path, "r", newline="", encoding="utf-8") as csv_file:
+                self.headers = next(csv.reader(csv_file), None)
+        except (OSError, StopIteration):
+            self.headers = None
+
+    def _read_last_line(self):
+        try:
+            with open(self.path, "rb") as csv_file:
+                csv_file.seek(0, os.SEEK_END)
+                end_pos = csv_file.tell()
+                if end_pos == 0:
+                    return None
+                block_size = min(8192, end_pos)
+                csv_file.seek(end_pos - block_size)
+                data = csv_file.read(block_size).decode("utf-8", errors="ignore")
+        except OSError:
+            return None
+
+        lines = [line for line in data.splitlines() if line.strip()]
+        if not lines or lines[-1].startswith("Time,"):
+            return None
+        return lines[-1]
+
+    def read_latest(self):
+        row = self.blank_row()
+        if self.headers is None:
+            self._read_header()
+        if not self.headers:
+            return row
+
+        last_line = self._read_last_line()
+        if last_line is None:
+            return row
+
+        parsed_rows = list(csv.reader([last_line]))
+        if not parsed_rows:
+            return row
+        values = parsed_rows[0]
+
+        for field_name, column_name, scale in JSBSIM_FIELDS:
+            try:
+                index = self.headers.index(column_name)
+                value = values[index]
+                if value != "":
+                    row[field_name] = float(value) * scale
+            except (ValueError, IndexError):
+                row[field_name] = ""
+        return row
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="SR-75 Layer 2 Pixhawk MAVLink HIL bridge skeleton"
@@ -79,6 +158,8 @@ def parse_args():
     parser.add_argument("--baud", type=int, default=115200, help="Pixhawk serial baud rate")
     parser.add_argument("--mp-out", default=None, help="Optional Mission Planner MAVLink output, e.g. udp:192.168.1.20:14550")
     parser.add_argument("--mp-in", default=None, help="Optional Mission Planner MAVLink input, e.g. udp:0.0.0.0:14551")
+    parser.add_argument("--jsbsim-csv", default=None, help="Optional read-only JSBSim CSV monitor path")
+    parser.add_argument("--jsbsim-read-only", action="store_true", help="Monitor JSBSim CSV without commanding JSBSim")
     parser.add_argument("--log", default=default_log_path(), help="CSV log path")
     parser.add_argument(
         "--no-actuator-output",
@@ -157,7 +238,7 @@ def msg_fields(msg, prefix, count):
     return values
 
 
-def make_row(start_time, latest):
+def make_row(start_time, latest, jsbsim_row=None):
     now = time.time()
     heartbeat = latest.get("HEARTBEAT")
     mode, armed = mode_and_armed(heartbeat)
@@ -192,6 +273,7 @@ def make_row(start_time, latest):
     row["airspeed_mps"] = getattr(vfr_hud, "airspeed", "")
     row["groundspeed_mps"] = getattr(vfr_hud, "groundspeed", "")
     row["throttle_pct"] = getattr(vfr_hud, "throttle", "")
+    row.update(jsbsim_row if jsbsim_row is not None else blank_jsbsim_row())
     return row
 
 
@@ -205,6 +287,15 @@ def print_status(row):
     )
 
 
+def print_jsbsim_status(row):
+    print(
+        f"JSBSim: t={row['jsb_time_s']} alt_m={row['jsb_alt_m']} agl_m={row['jsb_agl_m']} "
+        f"airspeed_mps={row['jsb_airspeed_mps']} "
+        f"rpy=({row['jsb_roll_rad']},{row['jsb_pitch_rad']},{row['jsb_yaw_rad']}) "
+        f"alpha={row['jsb_alpha_rad']}"
+    )
+
+
 def main():
     args = parse_args()
     print(SAFETY_WARNING.strip())
@@ -212,6 +303,9 @@ def main():
         print("Actuator/JSBSim output: DISABLED")
     else:
         print("Actuator output flag was enabled, but this skeleton still sends no actuator commands.")
+    jsbsim_monitor = JSBSimCSVMonitor(args.jsbsim_csv) if args.jsbsim_csv is not None else None
+    if jsbsim_monitor is not None:
+        print(f"JSBSim CSV monitoring: {args.jsbsim_csv} (read-only)")
 
     master = mavutil.mavlink_connection(args.pixhawk, baud=args.baud, autoreconnect=True)
     mp_in_sock = open_mp_in_socket(args.mp_in)
@@ -279,10 +373,13 @@ def main():
                         master.write(data)
 
             if now >= next_print:
-                row = make_row(start_time, latest)
+                jsbsim_row = jsbsim_monitor.read_latest() if jsbsim_monitor is not None else None
+                row = make_row(start_time, latest, jsbsim_row)
                 writer.writerow(row)
                 csv_file.flush()
                 print_status(row)
+                if jsbsim_monitor is not None:
+                    print_jsbsim_status(row)
                 next_print = now + 1.0
 
             time.sleep(0.002)
