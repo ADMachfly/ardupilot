@@ -1,0 +1,22 @@
+SR-75 Layer 2 HIL Bench Channel Map
+
+MAIN OUT 1  = Left elevon servo
+MAIN OUT 2  = Right elevon servo
+MAIN OUT 3  = Engine 1 throttle dummy / FADEC monitor only
+MAIN OUT 4  = Rudder / flap servo
+MAIN OUT 5  = Engine 2 throttle dummy / FADEC monitor only
+MAIN OUT 6  = Spare / second rudder / flap
+
+AUX OUT 1   = RATO ignition dummy LED/logger only
+AUX OUT 2   = RATO ejection dummy LED/logger only
+AUX OUT 3   = Camera trigger dummy
+AUX OUT 4   = Spare
+
+TELEM1      = Mission Planner telemetry
+TELEM2      = EMS / companion link later
+GPS         = GPS1, powered/logged only during first HIL
+SERIAL4/5   = GPS2 / EMS / camera later
+I2C/CAN     = Air data / compass later
+
+Safety:
+No live engine start, no fuel pump, no live RATO ignition, and no live ejection during Layer 2A/2B/2C.
