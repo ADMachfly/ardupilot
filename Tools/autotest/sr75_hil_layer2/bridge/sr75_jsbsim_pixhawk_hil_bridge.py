@@ -13,6 +13,7 @@ import math
 import os
 import signal
 import socket
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -61,6 +62,11 @@ def default_log_path():
     os.makedirs(logs_dir, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     return os.path.join(logs_dir, f"sr75_layer2_bridge_{stamp}.csv")
+
+
+def default_jsbsim_root():
+    here = os.path.abspath(os.path.dirname(__file__))
+    return os.path.abspath(os.path.join(here, os.pardir, os.pardir))
 
 
 def normalize_mp_out(mp_out):
@@ -150,6 +156,37 @@ class JSBSimCSVMonitor:
         return row
 
 
+def remove_old_jsbsim_outputs(root):
+    for filename in ("sr_75_6_dof_debug.csv", "sr_75_6_dof_cruise_test.csv"):
+        path = os.path.join(root, filename)
+        try:
+            os.remove(path)
+            print(f"Removed old JSBSim CSV output: {path}")
+        except FileNotFoundError:
+            pass
+        except OSError as ex:
+            print(f"Warning: could not remove old JSBSim CSV output {path}: {ex}")
+
+
+def start_jsbsim_subprocess(args):
+    if not args.start_jsbsim:
+        return None
+    if args.jsbsim_script is None:
+        raise RuntimeError("--start-jsbsim requires --jsbsim-script")
+
+    root = os.path.abspath(args.jsbsim_root)
+    remove_old_jsbsim_outputs(root)
+    cmd = [
+        "JSBSim",
+        f"--root={root}",
+        f"--script={args.jsbsim_script}",
+        "--realtime",
+        f"--end={args.jsbsim_end}",
+    ]
+    print("Starting read-only JSBSim subprocess: " + " ".join(cmd))
+    return subprocess.Popen(cmd)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="SR-75 Layer 2 Pixhawk MAVLink HIL bridge skeleton"
@@ -160,6 +197,10 @@ def parse_args():
     parser.add_argument("--mp-in", default=None, help="Optional Mission Planner MAVLink input, e.g. udp:0.0.0.0:14551")
     parser.add_argument("--jsbsim-csv", default=None, help="Optional read-only JSBSim CSV monitor path")
     parser.add_argument("--jsbsim-read-only", action="store_true", help="Monitor JSBSim CSV without commanding JSBSim")
+    parser.add_argument("--jsbsim-script", default=None, help="Optional JSBSim script path, relative to --jsbsim-root")
+    parser.add_argument("--jsbsim-root", default=default_jsbsim_root(), help="JSBSim root directory")
+    parser.add_argument("--jsbsim-end", type=float, default=10.0, help="JSBSim subprocess end time in seconds")
+    parser.add_argument("--start-jsbsim", action="store_true", help="Start JSBSim as a read-only subprocess")
     parser.add_argument("--log", default=default_log_path(), help="CSV log path")
     parser.add_argument(
         "--no-actuator-output",
@@ -306,6 +347,8 @@ def main():
     jsbsim_monitor = JSBSimCSVMonitor(args.jsbsim_csv) if args.jsbsim_csv is not None else None
     if jsbsim_monitor is not None:
         print(f"JSBSim CSV monitoring: {args.jsbsim_csv} (read-only)")
+    jsbsim_proc = start_jsbsim_subprocess(args)
+    jsbsim_exit_reported = False
 
     master = mavutil.mavlink_connection(args.pixhawk, baud=args.baud, autoreconnect=True)
     mp_in_sock = open_mp_in_socket(args.mp_in)
@@ -349,6 +392,12 @@ def main():
             if now >= next_request:
                 request_monitoring_streams(master)
                 next_request = now + 10.0
+
+            if jsbsim_proc is not None and not jsbsim_exit_reported:
+                returncode = jsbsim_proc.poll()
+                if returncode is not None:
+                    print(f"JSBSim subprocess exited with code {returncode}")
+                    jsbsim_exit_reported = True
 
             msg = master.recv_match(blocking=False)
             if msg is not None:
