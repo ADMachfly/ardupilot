@@ -11,6 +11,7 @@ import argparse
 import csv
 import os
 import signal
+import socket
 import sys
 import time
 from datetime import datetime, timezone
@@ -19,7 +20,7 @@ from pymavlink import mavutil
 
 
 MESSAGE_RATES_HZ = {
-    "SERVO_OUTPUT_RAW": 50,
+    "SERVO_OUTPUT_RAW": 5,
     "ATTITUDE": 10,
     "GLOBAL_POSITION_INT": 5,
     "VFR_HUD": 5,
@@ -51,6 +52,25 @@ def normalize_mp_out(mp_out):
     return mp_out
 
 
+def parse_udp_endpoint(endpoint):
+    if not endpoint.startswith("udp:"):
+        raise ValueError(f"Expected udp:HOST:PORT endpoint, got {endpoint}")
+    host_port = endpoint[len("udp:"):]
+    host, port = host_port.rsplit(":", 1)
+    return host, int(port)
+
+
+def open_mp_in_socket(mp_in):
+    if mp_in is None:
+        return None
+    host, port = parse_udp_endpoint(mp_in)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setblocking(False)
+    sock.bind((host, port))
+    print(f"Listening for Mission Planner inbound MAVLink on udp:{host}:{port}")
+    return sock
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="SR-75 Layer 2 Pixhawk MAVLink HIL bridge skeleton"
@@ -58,6 +78,7 @@ def parse_args():
     parser.add_argument("--pixhawk", required=True, help="Pixhawk serial device, e.g. /dev/ttyS4 or /dev/ttyACM0")
     parser.add_argument("--baud", type=int, default=115200, help="Pixhawk serial baud rate")
     parser.add_argument("--mp-out", default=None, help="Optional Mission Planner MAVLink output, e.g. udp:192.168.1.20:14550")
+    parser.add_argument("--mp-in", default=None, help="Optional Mission Planner MAVLink input, e.g. udp:0.0.0.0:14551")
     parser.add_argument("--log", default=default_log_path(), help="CSV log path")
     parser.add_argument(
         "--no-actuator-output",
@@ -192,9 +213,14 @@ def main():
     else:
         print("Actuator output flag was enabled, but this skeleton still sends no actuator commands.")
 
-    mp_out = normalize_mp_out(args.mp_out)
     master = mavutil.mavlink_connection(args.pixhawk, baud=args.baud, autoreconnect=True)
-    mp_link = mavutil.mavlink_connection(mp_out, input=False) if mp_out is not None else None
+    mp_in_sock = open_mp_in_socket(args.mp_in)
+    mp_out_addr = parse_udp_endpoint(args.mp_out) if mp_in_sock is not None and args.mp_out is not None else None
+    mp_out = normalize_mp_out(args.mp_out)
+    mp_link = mavutil.mavlink_connection(mp_out, input=False) if mp_in_sock is None and mp_out is not None else None
+    mp_in_seen = False
+    if mp_out_addr is not None:
+        print(f"Forwarding Pixhawk MAVLink traffic to Mission Planner at {args.mp_out} using the inbound UDP socket")
     if mp_link is not None:
         print(f"Forwarding Pixhawk MAVLink traffic to Mission Planner at {mp_out}")
 
@@ -235,8 +261,22 @@ def main():
                 msg_type = msg.get_type()
                 if msg_type != "BAD_DATA":
                     latest[msg_type] = msg
-                    if mp_link is not None:
+                    if mp_in_sock is not None and mp_out_addr is not None:
+                        mp_in_sock.sendto(msg.get_msgbuf(), mp_out_addr)
+                    elif mp_link is not None:
                         mp_link.write(msg.get_msgbuf())
+
+            if mp_in_sock is not None:
+                while True:
+                    try:
+                        data, addr = mp_in_sock.recvfrom(4096)
+                    except BlockingIOError:
+                        break
+                    if data:
+                        if not mp_in_seen:
+                            print(f"Received first Mission Planner inbound packet from {addr[0]}:{addr[1]}")
+                            mp_in_seen = True
+                        master.write(data)
 
             if now >= next_print:
                 row = make_row(start_time, latest)
