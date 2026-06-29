@@ -1,5 +1,10 @@
 #include "Plane.h"
 
+#if AP_SIM_ENABLED
+#include <SITL/SITL.h>
+#include <SITL/SIM_Plane.h>
+#endif
+
 #if HAL_LOGGING_ENABLED
 
 // Write an attitude packet
@@ -274,6 +279,25 @@ struct PACKED log_AETR {
     float speed_scaler;
 };
 
+struct PACKED log_SR75 {
+    LOG_PACKET_HEADER;
+    uint64_t time_us;
+    uint8_t rato_state;
+    float fuel_ml;
+    float fuel_flow_mlmin;
+    uint8_t fuel_empty;
+    float eng1_cmd;
+    float eng2_cmd;
+    float eng1_rpm;
+    float eng2_rpm;
+    float airspeed;
+    float alt;
+    float aoa;
+    float ssa;
+    uint8_t rato_ign;
+    uint8_t rato_eject;
+};
+
 void Plane::Log_Write_AETR()
 {
     struct log_AETR pkt = {
@@ -287,6 +311,74 @@ void Plane::Log_Write_AETR()
         ,steering : SRV_Channels::get_output_scaled(SRV_Channel::k_steering)
         ,speed_scaler : get_speed_scaler(),
         };
+
+    logger.WriteBlock(&pkt, sizeof(pkt));
+}
+
+void Plane::Log_Write_SR75()
+{
+    float fuel_ml = 0.0f;
+    float fuel_flow_mlmin = 0.0f;
+    uint8_t fuel_empty = 0;
+    float eng1_rpm = 0.0f;
+    float eng2_rpm = 0.0f;
+    float sr75_airspeed = 0.0f;
+    float sr75_alt = 0.0f;
+
+#if AP_SIM_ENABLED
+    const auto *sitl_state = AP::sitl();
+    if (sitl_state != nullptr) {
+        if (sitl_state->state.sr75_jsbsim_fuel_available) {
+            fuel_ml = sitl_state->state.sr75_fuel_ml;
+            fuel_flow_mlmin = sitl_state->state.sr75_fuel_flow_mlmin;
+            fuel_empty = sitl_state->state.sr75_fuel_empty ? 1U : 0U;
+        } else {
+            fuel_ml = SITL::Plane::get_sr75_fuel_ml();
+            fuel_flow_mlmin = SITL::Plane::get_sr75_fuel_flow_mlmin();
+            fuel_empty = SITL::Plane::get_sr75_fuel_empty() ? 1U : 0U;
+        }
+        eng1_rpm = sitl_state->state.rpm[0];
+        eng2_rpm = sitl_state->state.rpm[1];
+        sr75_airspeed = sitl_state->state.airspeed;
+        sr75_alt = sitl_state->state.altitude;
+    } else {
+        fuel_ml = SITL::Plane::get_sr75_fuel_ml();
+        fuel_flow_mlmin = SITL::Plane::get_sr75_fuel_flow_mlmin();
+        fuel_empty = SITL::Plane::get_sr75_fuel_empty() ? 1U : 0U;
+    }
+#endif
+
+    if (is_zero(sr75_airspeed)) {
+        AP_AHRS::AirspeedEstimateType airspeed_estimate_type;
+        ahrs.airspeed_EAS(sr75_airspeed, airspeed_estimate_type);
+    }
+    if (is_zero(sr75_alt)) {
+        Location loc;
+        IGNORE_RETURN(ahrs.get_location(loc));
+        IGNORE_RETURN(loc.get_alt_m(Location::AltFrame::ABSOLUTE, sr75_alt));
+    }
+
+    // SR-75 currently uses one throttle command for both turbojets.
+    const float engine_cmd = constrain_float(SRV_Channels::get_output_scaled(SRV_Channel::k_throttle) * 0.01f, 0.0f, 1.0f);
+
+    struct log_SR75 pkt = {
+        LOG_PACKET_HEADER_INIT(LOG_SR75_MSG),
+        time_us             : AP_HAL::micros64(),
+        rato_state          : static_cast<uint8_t>(g2.rato.get_state()),
+        fuel_ml             : fuel_ml,
+        fuel_flow_mlmin     : fuel_flow_mlmin,
+        fuel_empty          : fuel_empty,
+        eng1_cmd            : engine_cmd,
+        eng2_cmd            : engine_cmd,
+        eng1_rpm            : eng1_rpm,
+        eng2_rpm            : eng2_rpm,
+        airspeed            : sr75_airspeed,
+        alt                 : sr75_alt,
+        aoa                 : ahrs.getAOA(),
+        ssa                 : ahrs.getSSA(),
+        rato_ign            : uint8_t(g2.rato.ignition_commanded() ? 1 : 0),
+        rato_eject          : uint8_t(g2.rato.ejection_commanded() ? 1 : 0),
+    };
 
     logger.WriteBlock(&pkt, sizeof(pkt));
 }
@@ -522,6 +614,26 @@ const struct LogStructure Plane::log_structure[] = {
 // @Field: SS: Surface movement / airspeed scaling value
     { LOG_AETR_MSG, sizeof(log_AETR),
       "AETR", "Qfffffff",  "TimeUS,Ail,Elev,Thr,Rudd,Flap,Steer,SS", "s-------", "F-------" , true },
+
+// @LoggerMessage: SR75
+// @Description: SR-75 Layer 1C artificial sensor validation values
+// @Field: TimeUS: Time since system startup
+// @Field: RATOState: RATO state enum value
+// @Field: FuelML: SR-75 simulated fuel remaining
+// @Field: FuelFlowMLMin: SR-75 simulated fuel flow
+// @Field: FuelEmpty: True if simulated SR-75 fuel is exhausted
+// @Field: Eng1Cmd: Engine 1 command
+// @Field: Eng2Cmd: Engine 2 command
+// @Field: Eng1RPM: Engine 1 RPM
+// @Field: Eng2RPM: Engine 2 RPM
+// @Field: Airspeed: simulated airspeed
+// @Field: Alt: simulated altitude above sea level
+// @Field: AOA: angle of attack
+// @Field: SSA: side slip angle
+// @Field: RATOIgn: True if RATO ignition is commanded
+// @Field: RATOEject: True if RATO ejection is commanded
+    { LOG_SR75_MSG, sizeof(log_SR75),
+      "SR75", "QBffBffffffffBB", "TimeUS,RS,FML,FFM,FE,E1C,E2C,E1R,E2R,AS,Alt,AOA,SSA,RI,RE", "s--------------", "F--------------" , true },
 
 #if AP_PLANE_OFFBOARD_GUIDED_SLEW_ENABLED
 // @LoggerMessage: OFG

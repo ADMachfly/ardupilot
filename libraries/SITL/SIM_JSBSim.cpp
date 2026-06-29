@@ -599,6 +599,42 @@ void JSBSim::recv_fdm(const struct sitl_input &input)
     rpm[0] = fdm.rpm[0];
     rpm[1] = fdm.rpm[1];
 
+    if (sitl != nullptr) {
+        if (sr75_model) {
+            constexpr float lb_to_kg = 0.45359237f;
+            constexpr float jet_fuel_density_kg_per_l = 0.80f;
+            constexpr float ml_per_kg_jet_fuel = 1000.0f / jet_fuel_density_kg_per_l;
+            constexpr float ml_per_us_gallon = 3785.411784f;
+
+            const bool have_main_tank = fdm.num_tanks > 0;
+            const bool have_turbojets = fdm.num_engines >= 2;
+            sitl->state.sr75_jsbsim_fuel_available = have_main_tank || have_turbojets;
+
+            const float previous_fuel_ml = sitl->state.sr75_fuel_ml;
+            // JSBSim stores fuel mass internally in pounds; convert only for validation logging.
+            const float main_fuel_kg = have_main_tank ? MAX(fdm.fuel_quantity[0], 0.0f) * lb_to_kg : 0.0f;
+            const float current_fuel_ml = main_fuel_kg * ml_per_kg_jet_fuel;
+            sitl->state.sr75_fuel_ml = current_fuel_ml;
+
+            // FGNetFDM documents engine fuel_flow as gallons/hour.
+            const float turbojet_flow_gal_hr = have_turbojets ? MAX(fdm.fuel_flow[0], 0.0f) + MAX(fdm.fuel_flow[1], 0.0f) : 0.0f;
+            const float raw_fuel_flow_mlmin = turbojet_flow_gal_hr * ml_per_us_gallon / 60.0f;
+            float estimated_fuel_flow_mlmin = 0.0f;
+            if (have_main_tank && last_raw_jsbsim_time_us != 0 && fdm.cur_time > last_raw_jsbsim_time_us) {
+                const float dt_min = (fdm.cur_time - last_raw_jsbsim_time_us) * (1.0e-6f / 60.0f);
+                if (is_positive(dt_min)) {
+                    estimated_fuel_flow_mlmin = MAX(previous_fuel_ml - current_fuel_ml, 0.0f) / dt_min;
+                }
+            }
+            sitl->state.sr75_fuel_flow_mlmin = is_positive(raw_fuel_flow_mlmin) ? raw_fuel_flow_mlmin : estimated_fuel_flow_mlmin;
+            sitl->state.sr75_fuel_empty = have_main_tank && is_zero(sitl->state.sr75_fuel_ml);
+            sitl->state.sr75_alpha_rad = fdm.alpha;
+            sitl->state.sr75_beta_rad = fdm.beta;
+        } else {
+            sitl->state.sr75_jsbsim_fuel_available = false;
+        }
+    }
+
     // Maintain monotonic ArduPilot clock across JSBSim resets.
     // After reset, fdm.cur_time drops to near zero while time_now_us is large.
     const uint64_t raw_us = (uint64_t)fdm.cur_time;

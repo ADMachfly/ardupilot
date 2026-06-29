@@ -68,6 +68,8 @@ public:
     bool is_complete() const;
     bool is_aborted() const;
     bool is_boosting() const; // ← new, sits next to is_active(), is_complete(), is_aborted()
+    bool ignition_commanded() const { return state == State::IGNITION || state == State::BOOST; }
+    bool ejection_commanded() const { return state == State::EJECT; }
 
     State get_state() const { return state; }
     const char *state_name() const;

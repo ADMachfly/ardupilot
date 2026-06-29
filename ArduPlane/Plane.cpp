@@ -280,6 +280,9 @@ void Plane::update_logging10(void)
     // If any attitude logging is enabled log AOA and SSA
     if (attitude_med || attitude_faster) {
         ahrs.Write_AOA_SSA();
+        if (g2.rato.enable.get() > 0) {
+            Log_Write_SR75();
+        }
     }
 
 #if HAL_MOUNT_ENABLED

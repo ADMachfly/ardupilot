@@ -105,6 +105,14 @@ struct sitl_fdm {
     // AGL altitude, usually derived from the terrain database in simulation:
     float height_agl;
 
+    // SR-75 JSBSim fuel telemetry for validation logging only.
+    bool sr75_jsbsim_fuel_available;
+    float sr75_fuel_ml;
+    float sr75_fuel_flow_mlmin;
+    bool sr75_fuel_empty;
+    float sr75_alpha_rad;
+    float sr75_beta_rad;
+
 };
 
 // number of rc output channels

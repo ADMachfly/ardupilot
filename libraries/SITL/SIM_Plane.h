@@ -35,6 +35,10 @@ public:
     /* update model by one time step */
     virtual void update(const struct sitl_input &input) override;
 
+    static float get_sr75_fuel_ml();
+    static float get_sr75_fuel_flow_mlmin();
+    static bool get_sr75_fuel_empty();
+
     /* static object creator */
     static Aircraft *create(const char *frame_str) {
         return NEW_NOTHROW Plane(frame_str);

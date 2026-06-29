@@ -967,6 +967,7 @@ private:
     void Log_Write_RC(void);
     void Log_Write_Vehicle_Startup_Messages();
     void Log_Write_AETR();
+    void Log_Write_SR75();
 
 #if AP_PLANE_BLACKBOX_LOGGING
     void Log_Write_Blackbox(void);

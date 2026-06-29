@@ -38,6 +38,21 @@ static float sr75_fuel_ml         = SR75_FUEL_CAPACITY_ML;
 static float sr75_fuel_flow_mlmin = 0.0f;
 static bool  sr75_fuel_empty      = false;
 
+float Plane::get_sr75_fuel_ml()
+{
+    return sr75_fuel_ml;
+}
+
+float Plane::get_sr75_fuel_flow_mlmin()
+{
+    return sr75_fuel_flow_mlmin;
+}
+
+bool Plane::get_sr75_fuel_empty()
+{
+    return sr75_fuel_empty;
+}
+
 Plane::Plane(const char *frame_str) :
     Aircraft(frame_str)
 {

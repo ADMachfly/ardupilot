@@ -97,6 +97,7 @@ enum log_messages {
     LOG_TSIT_MSG,
     LOG_TILT_MSG,
     LOG_RFNS_MSG,
+    LOG_SR75_MSG,
 };
 
 #define MASK_LOG_ATTITUDE_FAST          (1<<0)
@@ -202,4 +203,3 @@ enum class RangeFinderUse : uint8_t {
     ASSIST  = (1U<<2),
     CLIMB   = (1U<<3),
 };
-
