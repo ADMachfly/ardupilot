@@ -40,6 +40,15 @@ JSBSIM_FIELDS = [
     ("jsb_yaw_rad", "/fdm/jsbsim/attitude/psi-deg", math.pi / 180.0),
     ("jsb_airspeed_mps", "/fdm/jsbsim/velocities/vt-fps", 0.3048),
     ("jsb_alpha_rad", "/fdm/jsbsim/aero/alpha-rad", 1.0),
+    ("jsb_vn_mps", "/fdm/jsbsim/velocities/v-north-fps", 0.3048),
+    ("jsb_ve_mps", "/fdm/jsbsim/velocities/v-east-fps", 0.3048),
+    ("jsb_vd_mps", "/fdm/jsbsim/velocities/v-down-fps", 0.3048),
+    ("jsb_p_rad_s", "/fdm/jsbsim/velocities/p-rad_sec", 1.0),
+    ("jsb_q_rad_s", "/fdm/jsbsim/velocities/q-rad_sec", 1.0),
+    ("jsb_r_rad_s", "/fdm/jsbsim/velocities/r-rad_sec", 1.0),
+    ("jsb_udot_mps2", "/fdm/jsbsim/accelerations/udot-ft_sec2", 0.3048),
+    ("jsb_vdot_mps2", "/fdm/jsbsim/accelerations/vdot-ft_sec2", 0.3048),
+    ("jsb_wdot_mps2", "/fdm/jsbsim/accelerations/wdot-ft_sec2", 0.3048),
 ]
 
 
@@ -187,6 +196,173 @@ def start_jsbsim_subprocess(args):
     return subprocess.Popen(cmd)
 
 
+def safe_float(row, field_name, default=None):
+    value = row.get(field_name, "")
+    if value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def euler_to_quaternion(roll, pitch, yaw):
+    cr = math.cos(roll * 0.5)
+    sr = math.sin(roll * 0.5)
+    cp = math.cos(pitch * 0.5)
+    sp = math.sin(pitch * 0.5)
+    cy = math.cos(yaw * 0.5)
+    sy = math.sin(yaw * 0.5)
+    return [
+        cr * cp * cy + sr * sp * sy,
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+    ]
+
+
+def cm_per_s(value):
+    return int(value * 100.0)
+
+
+def milli_g(value):
+    return int(value / 9.80665 * 1000.0)
+
+
+class HILInjector:
+    def __init__(self, master, rate_hz, gps_rate_hz, dry_run):
+        self.master = master
+        self.rate_hz = rate_hz
+        self.gps_rate_hz = gps_rate_hz
+        self.dry_run = dry_run
+        self.hil_gps_enabled = hasattr(master.mav, "hil_gps_send")
+        self.hil_state_quaternion_enabled = hasattr(master.mav, "hil_state_quaternion_send")
+        self.hil_state_enabled = not self.hil_state_quaternion_enabled and hasattr(master.mav, "hil_state_send")
+        enabled = []
+        if self.hil_gps_enabled:
+            enabled.append("HIL_GPS")
+        if self.hil_state_quaternion_enabled:
+            enabled.append("HIL_STATE_QUATERNION")
+        elif self.hil_state_enabled:
+            enabled.append("HIL_STATE")
+        print(f"HIL injection messages enabled: {', '.join(enabled) if enabled else 'none'}")
+
+    def _common(self, row):
+        lat = safe_float(row, "jsb_lat_deg")
+        lon = safe_float(row, "jsb_lon_deg")
+        alt = safe_float(row, "jsb_alt_m")
+        if lat is None or lon is None or alt is None:
+            return None
+        sim_time = safe_float(row, "jsb_time_s", time.time())
+        vn = safe_float(row, "jsb_vn_mps", 0.0)
+        ve = safe_float(row, "jsb_ve_mps", 0.0)
+        vd = safe_float(row, "jsb_vd_mps", 0.0)
+        airspeed = safe_float(row, "jsb_airspeed_mps", 0.0)
+        return {
+            "time_usec": int(sim_time * 1.0e6),
+            "lat": int(lat * 1.0e7),
+            "lon": int(lon * 1.0e7),
+            "alt": int(alt * 1000.0),
+            "vn": vn,
+            "ve": ve,
+            "vd": vd,
+            "airspeed": airspeed,
+        }
+
+    def send_gps(self, row):
+        if not self.hil_gps_enabled:
+            return False
+        data = self._common(row)
+        if data is None:
+            return False
+        horizontal_speed = math.hypot(data["vn"], data["ve"])
+        cog = int((math.degrees(math.atan2(data["ve"], data["vn"])) % 360.0) * 100.0) if horizontal_speed > 0.1 else 0
+        if not self.dry_run:
+            self.master.mav.hil_gps_send(
+                data["time_usec"],
+                3,
+                data["lat"],
+                data["lon"],
+                data["alt"],
+                100,
+                100,
+                cm_per_s(horizontal_speed),
+                cm_per_s(data["vn"]),
+                cm_per_s(data["ve"]),
+                cm_per_s(data["vd"]),
+                cog,
+                10,
+            )
+        return True
+
+    def send_state(self, row):
+        data = self._common(row)
+        if data is None:
+            return False
+        roll = safe_float(row, "jsb_roll_rad")
+        pitch = safe_float(row, "jsb_pitch_rad")
+        yaw = safe_float(row, "jsb_yaw_rad")
+        if roll is None or pitch is None or yaw is None:
+            return False
+        p = safe_float(row, "jsb_p_rad_s", 0.0)
+        q = safe_float(row, "jsb_q_rad_s", 0.0)
+        r = safe_float(row, "jsb_r_rad_s", 0.0)
+        xacc = milli_g(safe_float(row, "jsb_udot_mps2", 0.0))
+        yacc = milli_g(safe_float(row, "jsb_vdot_mps2", 0.0))
+        zacc = milli_g(safe_float(row, "jsb_wdot_mps2", 0.0))
+        if self.hil_state_quaternion_enabled:
+            if not self.dry_run:
+                self.master.mav.hil_state_quaternion_send(
+                    data["time_usec"],
+                    euler_to_quaternion(roll, pitch, yaw),
+                    p,
+                    q,
+                    r,
+                    data["lat"],
+                    data["lon"],
+                    data["alt"],
+                    cm_per_s(data["vn"]),
+                    cm_per_s(data["ve"]),
+                    cm_per_s(data["vd"]),
+                    cm_per_s(data["airspeed"]),
+                    cm_per_s(data["airspeed"]),
+                    xacc,
+                    yacc,
+                    zacc,
+                )
+            return True
+        if self.hil_state_enabled:
+            if not self.dry_run:
+                self.master.mav.hil_state_send(
+                    data["time_usec"],
+                    roll,
+                    pitch,
+                    yaw,
+                    p,
+                    q,
+                    r,
+                    data["lat"],
+                    data["lon"],
+                    data["alt"],
+                    cm_per_s(data["vn"]),
+                    cm_per_s(data["ve"]),
+                    cm_per_s(data["vd"]),
+                    xacc,
+                    yacc,
+                    zacc,
+                )
+            return True
+        return False
+
+    def print_summary(self, row):
+        print(
+            f"HIL {'dry-run ' if self.dry_run else ''}state: "
+            f"lat={row.get('jsb_lat_deg', '')} lon={row.get('jsb_lon_deg', '')} "
+            f"alt_m={row.get('jsb_alt_m', '')} "
+            f"vn={row.get('jsb_vn_mps', '')} ve={row.get('jsb_ve_mps', '')} vd={row.get('jsb_vd_mps', '')}"
+        )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="SR-75 Layer 2 Pixhawk MAVLink HIL bridge skeleton"
@@ -201,6 +377,10 @@ def parse_args():
     parser.add_argument("--jsbsim-root", default=default_jsbsim_root(), help="JSBSim root directory")
     parser.add_argument("--jsbsim-end", type=float, default=10.0, help="JSBSim subprocess end time in seconds")
     parser.add_argument("--start-jsbsim", action="store_true", help="Start JSBSim as a read-only subprocess")
+    parser.add_argument("--hil-inject", action="store_true", help="Send JSBSim state to Pixhawk using MAVLink HIL messages")
+    parser.add_argument("--hil-rate-hz", type=float, default=20.0, help="HIL state injection rate")
+    parser.add_argument("--hil-gps-rate-hz", type=float, default=5.0, help="HIL GPS injection rate")
+    parser.add_argument("--hil-dry-run", action="store_true", help="Compute HIL messages but do not send them")
     parser.add_argument("--log", default=default_log_path(), help="CSV log path")
     parser.add_argument(
         "--no-actuator-output",
@@ -351,6 +531,14 @@ def main():
     jsbsim_exit_reported = False
 
     master = mavutil.mavlink_connection(args.pixhawk, baud=args.baud, autoreconnect=True)
+    if args.hil_inject:
+        print(f"HIL injection: ENABLED at {args.hil_rate_hz:g} Hz, GPS {args.hil_gps_rate_hz:g} Hz")
+        if args.hil_dry_run:
+            print("HIL dry-run: computing messages but not sending")
+        hil_injector = HILInjector(master, args.hil_rate_hz, args.hil_gps_rate_hz, args.hil_dry_run)
+    else:
+        print("HIL injection: DISABLED")
+        hil_injector = None
     mp_in_sock = open_mp_in_socket(args.mp_in)
     mp_out_addr = parse_udp_endpoint(args.mp_out) if mp_in_sock is not None and args.mp_out is not None else None
     mp_out = normalize_mp_out(args.mp_out)
@@ -369,6 +557,9 @@ def main():
     next_heartbeat = 0.0
     next_request = 0.0
     next_print = 0.0
+    next_hil_state = 0.0
+    next_hil_gps = 0.0
+    next_hil_summary = 0.0
     running = True
 
     def stop(_signum, _frame):
@@ -398,6 +589,19 @@ def main():
                 if returncode is not None:
                     print(f"JSBSim subprocess exited with code {returncode}")
                     jsbsim_exit_reported = True
+
+            if hil_injector is not None and jsbsim_monitor is not None:
+                if now >= next_hil_state:
+                    hil_row = jsbsim_monitor.read_latest()
+                    hil_injector.send_state(hil_row)
+                    next_hil_state = now + (1.0 / max(args.hil_rate_hz, 0.1))
+                    if args.hil_dry_run and now >= next_hil_summary:
+                        hil_injector.print_summary(hil_row)
+                        next_hil_summary = now + 1.0
+                if now >= next_hil_gps:
+                    hil_row = jsbsim_monitor.read_latest()
+                    hil_injector.send_gps(hil_row)
+                    next_hil_gps = now + (1.0 / max(args.hil_gps_rate_hz, 0.1))
 
             msg = master.recv_match(blocking=False)
             if msg is not None:
