@@ -113,6 +113,12 @@ class JSBSimCSVMonitor:
     def blank_row(self):
         return blank_jsbsim_row()
 
+    def mtime(self):
+        try:
+            return os.path.getmtime(self.path)
+        except OSError:
+            return None
+
     def _read_header(self):
         try:
             with open(self.path, "r", newline="", encoding="utf-8") as csv_file:
@@ -235,6 +241,10 @@ class HILInjector:
         self.rate_hz = rate_hz
         self.gps_rate_hz = gps_rate_hz
         self.dry_run = dry_run
+        self.hil_state_sent_count = 0
+        self.hil_gps_sent_count = 0
+        self.hil_state_dryrun_count = 0
+        self.hil_gps_dryrun_count = 0
         self.hil_gps_enabled = hasattr(master.mav, "hil_gps_send")
         self.hil_state_quaternion_enabled = hasattr(master.mav, "hil_state_quaternion_send")
         self.hil_state_enabled = not self.hil_state_quaternion_enabled and hasattr(master.mav, "hil_state_send")
@@ -293,6 +303,9 @@ class HILInjector:
                 cog,
                 10,
             )
+            self.hil_gps_sent_count += 1
+        else:
+            self.hil_gps_dryrun_count += 1
         return True
 
     def send_state(self, row):
@@ -330,6 +343,9 @@ class HILInjector:
                     yacc,
                     zacc,
                 )
+                self.hil_state_sent_count += 1
+            else:
+                self.hil_state_dryrun_count += 1
             return True
         if self.hil_state_enabled:
             if not self.dry_run:
@@ -351,15 +367,17 @@ class HILInjector:
                     yacc,
                     zacc,
                 )
+                self.hil_state_sent_count += 1
+            else:
+                self.hil_state_dryrun_count += 1
             return True
         return False
 
-    def print_summary(self, row):
+    def print_status(self, last_jsb_t):
         print(
-            f"HIL {'dry-run ' if self.dry_run else ''}state: "
-            f"lat={row.get('jsb_lat_deg', '')} lon={row.get('jsb_lon_deg', '')} "
-            f"alt_m={row.get('jsb_alt_m', '')} "
-            f"vn={row.get('jsb_vn_mps', '')} ve={row.get('jsb_ve_mps', '')} vd={row.get('jsb_vd_mps', '')}"
+            f"HIL: state_sent={self.hil_state_sent_count} gps_sent={self.hil_gps_sent_count} "
+            f"dryrun_state={self.hil_state_dryrun_count} dryrun_gps={self.hil_gps_dryrun_count} "
+            f"last_jsb_t={last_jsb_t if last_jsb_t is not None else ''}"
         )
 
 
@@ -381,6 +399,7 @@ def parse_args():
     parser.add_argument("--hil-rate-hz", type=float, default=20.0, help="HIL state injection rate")
     parser.add_argument("--hil-gps-rate-hz", type=float, default=5.0, help="HIL GPS injection rate")
     parser.add_argument("--hil-dry-run", action="store_true", help="Compute HIL messages but do not send them")
+    parser.add_argument("--hil-max-stale-s", type=float, default=1.0, help="Maximum JSBSim CSV staleness before HIL pauses")
     parser.add_argument("--log", default=default_log_path(), help="CSV log path")
     parser.add_argument(
         "--no-actuator-output",
@@ -532,10 +551,13 @@ def main():
 
     master = mavutil.mavlink_connection(args.pixhawk, baud=args.baud, autoreconnect=True)
     if args.hil_inject:
-        print(f"HIL injection: ENABLED at {args.hil_rate_hz:g} Hz, GPS {args.hil_gps_rate_hz:g} Hz")
+        print("HIL injection: ENABLED")
+        print(f"HIL injection rates: state {args.hil_rate_hz:g} Hz, GPS {args.hil_gps_rate_hz:g} Hz")
         if args.hil_dry_run:
             print("HIL dry-run: computing messages but not sending")
         hil_injector = HILInjector(master, args.hil_rate_hz, args.hil_gps_rate_hz, args.hil_dry_run)
+        print(f"HIL_STATE_QUATERNION available: {'yes' if hil_injector.hil_state_quaternion_enabled else 'no'}")
+        print(f"HIL_GPS available: {'yes' if hil_injector.hil_gps_enabled else 'no'}")
     else:
         print("HIL injection: DISABLED")
         hil_injector = None
@@ -559,7 +581,11 @@ def main():
     next_print = 0.0
     next_hil_state = 0.0
     next_hil_gps = 0.0
-    next_hil_summary = 0.0
+    next_hil_status = 0.0
+    last_hil_jsb_t = None
+    last_hil_jsb_mtime = None
+    last_hil_advance_wall = time.time()
+    hil_stale_reported = False
     running = True
 
     def stop(_signum, _frame):
@@ -590,18 +616,43 @@ def main():
                     print(f"JSBSim subprocess exited with code {returncode}")
                     jsbsim_exit_reported = True
 
-            if hil_injector is not None and jsbsim_monitor is not None:
-                if now >= next_hil_state:
+            if hil_injector is not None:
+                if now >= next_hil_status:
+                    hil_injector.print_status(last_hil_jsb_t)
+                    next_hil_status = now + 1.0
+
+                hil_state_due = now >= next_hil_state
+                hil_gps_due = now >= next_hil_gps
+                if jsbsim_monitor is not None and (hil_state_due or hil_gps_due):
                     hil_row = jsbsim_monitor.read_latest()
-                    hil_injector.send_state(hil_row)
-                    next_hil_state = now + (1.0 / max(args.hil_rate_hz, 0.1))
-                    if args.hil_dry_run and now >= next_hil_summary:
-                        hil_injector.print_summary(hil_row)
-                        next_hil_summary = now + 1.0
-                if now >= next_hil_gps:
-                    hil_row = jsbsim_monitor.read_latest()
-                    hil_injector.send_gps(hil_row)
-                    next_hil_gps = now + (1.0 / max(args.hil_gps_rate_hz, 0.1))
+                    hil_jsb_t = safe_float(hil_row, "jsb_time_s")
+                    hil_jsb_mtime = jsbsim_monitor.mtime()
+                    data_advanced = (
+                        hil_jsb_t is not None and hil_jsb_t != last_hil_jsb_t
+                    ) or (
+                        hil_jsb_mtime is not None and hil_jsb_mtime != last_hil_jsb_mtime
+                    )
+                    if data_advanced:
+                        last_hil_advance_wall = now
+                        hil_stale_reported = False
+                    last_hil_jsb_t = hil_jsb_t if hil_jsb_t is not None else last_hil_jsb_t
+                    last_hil_jsb_mtime = hil_jsb_mtime if hil_jsb_mtime is not None else last_hil_jsb_mtime
+
+                    hil_stale = now - last_hil_advance_wall > args.hil_max_stale_s
+                    if hil_stale:
+                        if not hil_stale_reported:
+                            print("HIL paused: stale JSBSim data")
+                            hil_stale_reported = True
+                    else:
+                        if hil_state_due:
+                            hil_injector.send_state(hil_row)
+                        if hil_gps_due:
+                            hil_injector.send_gps(hil_row)
+
+                    if hil_state_due:
+                        next_hil_state = now + (1.0 / max(args.hil_rate_hz, 0.1))
+                    if hil_gps_due:
+                        next_hil_gps = now + (1.0 / max(args.hil_gps_rate_hz, 0.1))
 
             msg = master.recv_match(blocking=False)
             if msg is not None:
