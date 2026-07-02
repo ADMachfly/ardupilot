@@ -390,11 +390,17 @@ class HILInjector:
             return True
         return False
 
-    def print_status(self, last_jsb_t):
+    def print_status(self, last_jsb_t, gps_input_injector=None):
+        gps_input_status = ""
+        if gps_input_injector is not None:
+            gps_input_status = (
+                f" gps_input_sent={gps_input_injector.gps_input_sent_count}"
+                f" gps_input_dryrun={gps_input_injector.gps_input_dryrun_count}"
+            )
         print(
             f"HIL: state_sent={self.hil_state_sent_count} gps_sent={self.hil_gps_sent_count} "
             f"dryrun_state={self.hil_state_dryrun_count} dryrun_gps={self.hil_gps_dryrun_count} "
-            f"last_jsb_t={last_jsb_t if last_jsb_t is not None else ''}"
+            f"last_jsb_t={last_jsb_t if last_jsb_t is not None else ''}{gps_input_status}"
         )
 
 
@@ -500,7 +506,7 @@ class GPSInputInjector:
             "speed_accuracy": 0.5,
             "horiz_accuracy": 1.0,
             "vert_accuracy": 1.5,
-            "satellites_visible": 12,
+            "satellites_visible": 10,
         }
         reasons = self.validate_packet(packet)
         self.maybe_print_debug(packet, reasons)
@@ -720,6 +726,36 @@ def print_jsbsim_status(row):
     )
 
 
+def print_pixhawk_nav_compare(row, latest):
+    if row is None or row.get("jsb_time_s", "") == "":
+        return
+
+    global_position = latest.get("GLOBAL_POSITION_INT")
+    gps_raw = latest.get("GPS_RAW_INT")
+    vfr_hud = latest.get("VFR_HUD")
+    ekf_status = latest.get("EKF_STATUS_REPORT")
+
+    pix_lat = getattr(global_position, "lat", "") / 1.0e7 if global_position is not None else ""
+    pix_lon = getattr(global_position, "lon", "") / 1.0e7 if global_position is not None else ""
+    pix_alt_m = getattr(global_position, "alt", "") / 1000.0 if global_position is not None else ""
+    pix_rel_alt_m = getattr(global_position, "relative_alt", "") / 1000.0 if global_position is not None else ""
+    pix_groundspeed = getattr(vfr_hud, "groundspeed", "")
+    pix_heading = getattr(vfr_hud, "heading", "")
+    gps_fix = getattr(gps_raw, "fix_type", "")
+    gps_sats = getattr(gps_raw, "satellites_visible", "")
+    ekf_flags = getattr(ekf_status, "flags", "")
+
+    print(
+        "NAV_COMPARE: "
+        f"jsb_lat={row['jsb_lat_deg']} jsb_lon={row['jsb_lon_deg']} "
+        f"jsb_alt_m={row['jsb_alt_m']} "
+        f"jsb_vn={row['jsb_vn_mps']} jsb_ve={row['jsb_ve_mps']} jsb_vd={row['jsb_vd_mps']} "
+        f"pix_lat={pix_lat} pix_lon={pix_lon} pix_alt_m={pix_alt_m} pix_rel_alt_m={pix_rel_alt_m} "
+        f"pix_groundspeed={pix_groundspeed} pix_heading={pix_heading} "
+        f"gps_fix={gps_fix} gps_sats={gps_sats} ekf_flags={ekf_flags}"
+    )
+
+
 def main():
     args = parse_args()
     print(SAFETY_WARNING.strip())
@@ -745,6 +781,7 @@ def main():
     else:
         print("HIL injection: DISABLED")
         hil_injector = None
+    gps_input_dry_run = args.gps_input_dry_run or args.hil_dry_run
     if args.gps_input_inject or args.gps_input_static_test:
         print(f"GPS_INPUT injection: ENABLED at {args.gps_input_rate_hz:g} Hz")
         if args.gps_input_static_test:
@@ -754,12 +791,12 @@ def main():
                 f"alt_m={args.gps_input_static_alt_m} "
                 f"vel_ned=({args.gps_input_static_vn},{args.gps_input_static_ve},{args.gps_input_static_vd})"
             )
-        if args.gps_input_dry_run:
+        if gps_input_dry_run:
             print("GPS_INPUT dry-run: computing messages but not sending")
         gps_input_injector = GPSInputInjector(
             master,
             args.gps_input_rate_hz,
-            args.gps_input_dry_run,
+            gps_input_dry_run,
             args.gps_input_id,
             args.gps_input_ignore_flags,
             args.gps_input_debug,
@@ -825,11 +862,11 @@ def main():
 
             if hil_injector is not None:
                 if now >= next_hil_status:
-                    hil_injector.print_status(last_hil_jsb_t)
+                    hil_injector.print_status(last_hil_jsb_t, gps_input_injector)
                     next_hil_status = now + 1.0
 
             if gps_input_injector is not None:
-                if now >= next_gps_input_status:
+                if hil_injector is None and now >= next_gps_input_status:
                     if args.gps_input_static_test:
                         gps_input_injector.print_static_status()
                     else:
@@ -912,6 +949,8 @@ def main():
                 print_status(row)
                 if jsbsim_monitor is not None:
                     print_jsbsim_status(row)
+                if args.gps_input_inject or args.hil_inject:
+                    print_pixhawk_nav_compare(row, latest)
                 next_print = now + 1.0
 
             time.sleep(0.002)
