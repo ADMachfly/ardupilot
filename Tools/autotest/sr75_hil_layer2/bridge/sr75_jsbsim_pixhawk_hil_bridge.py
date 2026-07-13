@@ -88,6 +88,14 @@ def blank_gps_input_log_row(enabled=False):
     }
 
 
+def blank_airspeed_log_row(enabled=False):
+    return {
+        "airspeed_input_enabled": int(enabled),
+        "airspeed_tx_mps": "",
+        "airspeed_tx_count": 0,
+    }
+
+
 SAFETY_WARNING = """
 SR-75 LAYER 2 HIL BENCH SAFETY
 No live engine, no fuel pump, no live RATO ignition, no live ejection.
@@ -607,6 +615,67 @@ class GPSInputInjector:
         return row
 
 
+class AirspeedInjector:
+    MAVLINK_NAME = b"AIRSPEED"
+
+    def __init__(self, master, rate_hz, airspeed_mps):
+        self.master = master
+        self.rate_hz = rate_hz
+        self.airspeed_mps = airspeed_mps
+        self.airspeed_tx_count = 0
+        self.airspeed_send_exception_count = 0
+        self.last_airspeed_mps = ""
+        self.airspeed_enabled = hasattr(master.mav, "named_value_float_send")
+        print(f"AIRSPEED MAVLink transmit message: NAMED_VALUE_FLOAT")
+        print(f"NAMED_VALUE_FLOAT available: {'yes' if self.airspeed_enabled else 'no'}")
+        if self.airspeed_enabled:
+            print(f"NAMED_VALUE_FLOAT send signature: {inspect.signature(master.mav.named_value_float_send)}")
+        print(
+            "AIRSPEED Pixhawk consumption: not direct; inbound NAMED_VALUE_FLOAT "
+            "is logged by ArduPilot but not consumed by AP_Airspeed"
+        )
+
+    def validate(self):
+        if not math.isfinite(self.airspeed_mps):
+            return "airspeed is not finite"
+        if self.airspeed_mps < 0.0:
+            return "airspeed is negative"
+        return None
+
+    def send(self):
+        if not self.airspeed_enabled:
+            return False
+        reason = self.validate()
+        if reason is not None:
+            print(f"AIRSPEED invalid: {reason}")
+            return False
+        try:
+            self.master.mav.named_value_float_send(
+                int(time.monotonic() * 1000.0),
+                self.MAVLINK_NAME,
+                self.airspeed_mps,
+            )
+        except Exception as ex:
+            self.airspeed_send_exception_count += 1
+            print(f"AIRSPEED send exception: {ex}")
+            return False
+        self.airspeed_tx_count += 1
+        self.last_airspeed_mps = self.airspeed_mps
+        return True
+
+    def print_observer(self):
+        if self.last_airspeed_mps == "":
+            return
+        print(f"AS_TX airspeed={self.last_airspeed_mps:.2f} count={self.airspeed_tx_count}")
+
+    def log_row(self):
+        row = blank_airspeed_log_row(True)
+        row["airspeed_tx_count"] = self.airspeed_tx_count
+        if self.last_airspeed_mps != "":
+            row["airspeed_tx_mps"] = f"{self.last_airspeed_mps:.2f}"
+        return row
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="SR-75 Layer 2 Pixhawk MAVLink HIL bridge skeleton"
@@ -643,6 +712,9 @@ def parse_args():
     parser.add_argument("--gps-input-static-vn", type=float, default=0.0, help="Static GPS_INPUT north velocity in m/s")
     parser.add_argument("--gps-input-static-ve", type=float, default=0.0, help="Static GPS_INPUT east velocity in m/s")
     parser.add_argument("--gps-input-static-vd", type=float, default=0.0, help="Static GPS_INPUT down velocity in m/s")
+    parser.add_argument("--airspeed-inject", action="store_true", help="Transmit synthetic airspeed as MAVLink NAMED_VALUE_FLOAT")
+    parser.add_argument("--airspeed-mps", type=float, default=69.0, help="Synthetic airspeed value in m/s")
+    parser.add_argument("--airspeed-rate-hz", type=float, default=10.0, help="Synthetic airspeed transmit rate")
     parser.add_argument("--log", default=default_log_path(), help="CSV log path")
     parser.add_argument(
         "--no-actuator-output",
@@ -721,7 +793,7 @@ def msg_fields(msg, prefix, count):
     return values
 
 
-def make_row(start_time, latest, jsbsim_row=None, gps_input_row=None):
+def make_row(start_time, latest, jsbsim_row=None, gps_input_row=None, airspeed_input_row=None):
     now = time.time()
     heartbeat = latest.get("HEARTBEAT")
     mode, armed = mode_and_armed(heartbeat)
@@ -758,6 +830,7 @@ def make_row(start_time, latest, jsbsim_row=None, gps_input_row=None):
     row["throttle_pct"] = getattr(vfr_hud, "throttle", "")
     row.update(jsbsim_row if jsbsim_row is not None else blank_jsbsim_row())
     row.update(gps_input_row if gps_input_row is not None else blank_gps_input_log_row())
+    row.update(airspeed_input_row if airspeed_input_row is not None else blank_airspeed_log_row())
     return row
 
 
@@ -865,6 +938,14 @@ def main():
     else:
         print("GPS_INPUT injection: DISABLED")
         gps_input_injector = None
+    if args.airspeed_inject:
+        print("AIRSPEED injection: ENABLED")
+        print(f"AIRSPEED rate: {args.airspeed_rate_hz:g} Hz")
+        print(f"AIRSPEED value: {args.airspeed_mps:.1f} m/s")
+        airspeed_injector = AirspeedInjector(master, args.airspeed_rate_hz, args.airspeed_mps)
+    else:
+        print("AIRSPEED injection: DISABLED")
+        airspeed_injector = None
     mp_in_sock = open_mp_in_socket(args.mp_in)
     mp_out_addr = parse_udp_endpoint(args.mp_out) if mp_in_sock is not None and args.mp_out is not None else None
     mp_out = normalize_mp_out(args.mp_out)
@@ -888,6 +969,7 @@ def main():
     next_hil_status = 0.0
     next_gps_input = 0.0
     next_gps_input_status = 0.0
+    next_airspeed = 0.0
     last_hil_jsb_t = None
     last_hil_jsb_mtime = None
     last_hil_advance_wall = time.time()
@@ -932,10 +1014,14 @@ def main():
                     gps_input_injector.print_status(last_hil_jsb_t)
                     next_gps_input_status = now + 1.0
 
-            if hil_injector is not None or gps_input_injector is not None:
+            if hil_injector is not None or gps_input_injector is not None or airspeed_injector is not None:
                 hil_state_due = now >= next_hil_state
                 hil_gps_due = now >= next_hil_gps
                 gps_input_due = now >= next_gps_input
+                airspeed_due = now >= next_airspeed
+                if airspeed_injector is not None and airspeed_due:
+                    airspeed_injector.send()
+                    next_airspeed = now + (1.0 / max(args.airspeed_rate_hz, 0.1))
                 if gps_input_injector is not None and gps_input_static_enabled and gps_input_due:
                     gps_input_injector.send(static_gps_input_row(args))
                     next_gps_input = now + (1.0 / max(args.gps_input_rate_hz, 0.1))
@@ -1003,12 +1089,15 @@ def main():
             if now >= next_print:
                 jsbsim_row = jsbsim_monitor.read_latest() if jsbsim_monitor is not None else None
                 gps_input_row = gps_input_injector.log_row() if gps_input_injector is not None else None
-                row = make_row(start_time, latest, jsbsim_row, gps_input_row)
+                airspeed_input_row = airspeed_injector.log_row() if airspeed_injector is not None else None
+                row = make_row(start_time, latest, jsbsim_row, gps_input_row, airspeed_input_row)
                 writer.writerow(row)
                 csv_file.flush()
                 print_status(row)
                 if gps_input_injector is not None and gps_input_static_enabled:
                     gps_input_injector.print_observer()
+                if airspeed_injector is not None:
+                    airspeed_injector.print_observer()
                 if jsbsim_monitor is not None:
                     print_jsbsim_status(row)
                 if args.gps_input_inject or args.hil_inject:
