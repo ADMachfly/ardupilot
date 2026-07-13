@@ -4,6 +4,7 @@
 #include <AP_RPM/AP_RPM_config.h>
 #include <AP_Airspeed/AP_Airspeed_config.h>
 #include <AP_EFI/AP_EFI_config.h>
+#include <cstring>
 
 MAV_TYPE GCS_Plane::frame_type() const
 {
@@ -257,6 +258,11 @@ bool GCS_MAVLINK_Plane::get_target_location(Location &loc) const
 
 float GCS_MAVLINK_Plane::vfr_hud_airspeed() const
 {
+    float sr75_airspeed;
+    if (plane.sr75_external_airspeed(sr75_airspeed)) {
+        return sr75_airspeed;
+    }
+
     // airspeed sensors are best.  While the AHRS airspeed_estimate
     // will use an airspeed sensor, that value is constrained by the
     // ground speed.  When reporting we should send the true airspeed
@@ -990,6 +996,37 @@ void GCS_MAVLINK_Plane::handle_manual_control_axes(const mavlink_manual_control_
     manual_override(plane.channel_rudder, packet.r, 1000, 2000, tnow);
 }
 
+bool GCS_MAVLINK_Plane::handle_sr75_named_value_float(const mavlink_message_t &msg)
+{
+    mavlink_named_value_float_t packet;
+    mavlink_msg_named_value_float_decode(&msg, &packet);
+
+    static constexpr char airspeed_name[] = "AIRSPEED";
+    static constexpr uint8_t airspeed_name_len = sizeof(airspeed_name) - 1;
+    static_assert(airspeed_name_len < MAVLINK_MSG_NAMED_VALUE_FLOAT_FIELD_NAME_LEN,
+                  "AIRSPEED name must fit in NAMED_VALUE_FLOAT name field");
+
+    if (strncmp(packet.name, airspeed_name, airspeed_name_len) != 0 ||
+        packet.name[airspeed_name_len] != '\0') {
+        return false;
+    }
+
+    const float airspeed_mps = packet.value;
+    if (!isfinite(airspeed_mps) ||
+        is_negative(airspeed_mps) ||
+        airspeed_mps > Plane::SR75_EXT_AIRSPEED_MAX_MPS) {
+        plane.sr75_ext_airspeed_reject_count++;
+        plane.sr75_ext_airspeed_valid = false;
+        return true;
+    }
+
+    plane.sr75_ext_airspeed_mps = airspeed_mps;
+    plane.sr75_ext_airspeed_last_ms = AP_HAL::millis();
+    plane.sr75_ext_airspeed_valid = true;
+    plane.sr75_ext_airspeed_rx_count++;
+    return true;
+}
+
 void GCS_MAVLINK_Plane::handle_message(const mavlink_message_t &msg)
 {
     switch (msg.msgid) {
@@ -1004,6 +1041,11 @@ void GCS_MAVLINK_Plane::handle_message(const mavlink_message_t &msg)
 
     case MAVLINK_MSG_ID_SET_POSITION_TARGET_GLOBAL_INT:
         handle_set_position_target_global_int(msg);
+        break;
+
+    case MAVLINK_MSG_ID_NAMED_VALUE_FLOAT:
+        handle_sr75_named_value_float(msg);
+        GCS_MAVLINK::handle_message(msg);
         break;
 
     default:

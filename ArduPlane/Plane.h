@@ -417,6 +417,17 @@ private:
     int32_t target_airspeed_cm;
     int32_t new_airspeed_cm = -1;  //temp variable for AUTO and GUIDED mode speed changes
 
+    static constexpr uint32_t SR75_EXT_AIRSPEED_TIMEOUT_MS = 3000;
+    static constexpr float SR75_EXT_AIRSPEED_MAX_MPS = 150.0f;
+
+    bool sr75_ext_airspeed_valid = false;
+    float sr75_ext_airspeed_mps = 0.0f;
+    uint32_t sr75_ext_airspeed_last_ms = 0;
+    uint32_t sr75_ext_airspeed_rx_count = 0;
+    uint32_t sr75_ext_airspeed_reject_count = 0;
+
+    bool sr75_external_airspeed(float &airspeed_mps) const;
+
     // The difference between current and desired airspeed.  Used in the pitch controller.  Meters per second.
     float airspeed_error;
 

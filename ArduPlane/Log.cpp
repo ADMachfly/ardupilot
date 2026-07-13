@@ -348,7 +348,10 @@ void Plane::Log_Write_SR75()
     }
 #endif
 
-    if (is_zero(sr75_airspeed)) {
+    float sr75_ext_airspeed;
+    if (sr75_external_airspeed(sr75_ext_airspeed)) {
+        sr75_airspeed = sr75_ext_airspeed;
+    } else if (is_zero(sr75_airspeed)) {
         AP_AHRS::AirspeedEstimateType airspeed_estimate_type;
         ahrs.airspeed_EAS(sr75_airspeed, airspeed_estimate_type);
     }

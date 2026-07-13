@@ -155,6 +155,18 @@ void Plane::get_scheduler_tasks(const AP_Scheduler::Task *&tasks,
     log_bit = MASK_LOG_PM;
 }
 
+bool Plane::sr75_external_airspeed(float &airspeed_mps) const
+{
+    if (!sr75_ext_airspeed_valid) {
+        return false;
+    }
+    if (AP_HAL::millis() - sr75_ext_airspeed_last_ms > SR75_EXT_AIRSPEED_TIMEOUT_MS) {
+        return false;
+    }
+    airspeed_mps = sr75_ext_airspeed_mps;
+    return true;
+}
+
 #if HAL_QUADPLANE_ENABLED
 constexpr int8_t Plane::_failsafe_priorities[7];
 #else
