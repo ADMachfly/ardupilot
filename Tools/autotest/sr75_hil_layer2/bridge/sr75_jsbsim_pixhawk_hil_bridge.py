@@ -27,6 +27,9 @@ GPS_EPOCH_UNIX_S = 315964800
 MESSAGE_RATES_HZ = {
     "SERVO_OUTPUT_RAW": 5,
     "ATTITUDE": 10,
+    "AHRS2": 5,
+    "EKF_STATUS_REPORT": 2,
+    "LOCAL_POSITION_NED": 5,
     "GLOBAL_POSITION_INT": 5,
     "VFR_HUD": 5,
     "RC_CHANNELS": 5,
@@ -755,7 +758,10 @@ def send_bridge_heartbeat(master):
 
 
 def request_message_interval(master, message_name, rate_hz):
-    message_id = getattr(mavutil.mavlink, f"MAVLINK_MSG_ID_{message_name}")
+    message_id = getattr(mavutil.mavlink, f"MAVLINK_MSG_ID_{message_name}", None)
+    if message_id is None:
+        print(f"{message_name} message is not available in this MAVLink dialect")
+        return
     interval_us = int(1_000_000 / rate_hz) if rate_hz > 0 else -1
     master.mav.command_long_send(
         master.target_system,
@@ -801,6 +807,9 @@ def make_row(start_time, latest, jsbsim_row=None, gps_input_row=None, airspeed_i
     servo = latest.get("SERVO_OUTPUT_RAW")
     rc = latest.get("RC_CHANNELS")
     attitude = latest.get("ATTITUDE")
+    ahrs2 = latest.get("AHRS2")
+    ekf_status = latest.get("EKF_STATUS_REPORT")
+    local_position_ned = latest.get("LOCAL_POSITION_NED")
     global_position = latest.get("GLOBAL_POSITION_INT")
     vfr_hud = latest.get("VFR_HUD")
 
@@ -821,6 +830,16 @@ def make_row(start_time, latest, jsbsim_row=None, gps_input_row=None, airspeed_i
     row["roll_rad"] = getattr(attitude, "roll", "")
     row["pitch_rad"] = getattr(attitude, "pitch", "")
     row["yaw_rad"] = getattr(attitude, "yaw", "")
+    row["att_roll_rad"] = getattr(attitude, "roll", "")
+    row["att_pitch_rad"] = getattr(attitude, "pitch", "")
+    row["att_yaw_rad"] = getattr(attitude, "yaw", "")
+    row["ahrs2_roll_rad"] = getattr(ahrs2, "roll", "")
+    row["ahrs2_pitch_rad"] = getattr(ahrs2, "pitch", "")
+    row["ahrs2_yaw_rad"] = getattr(ahrs2, "yaw", "")
+    row["ekf_flags"] = getattr(ekf_status, "flags", "")
+    row["local_ned_x_m"] = getattr(local_position_ned, "x", "")
+    row["local_ned_y_m"] = getattr(local_position_ned, "y", "")
+    row["local_ned_z_m"] = getattr(local_position_ned, "z", "")
     row["lat_deg"] = getattr(global_position, "lat", "") / 1.0e7 if global_position is not None else ""
     row["lon_deg"] = getattr(global_position, "lon", "") / 1.0e7 if global_position is not None else ""
     row["alt_m"] = getattr(global_position, "alt", "") / 1000.0 if global_position is not None else ""
@@ -841,6 +860,16 @@ def print_status(row):
         f"t={row['time_s']} mode={row['mode']} armed={row['armed']} "
         f"servo=[{servos}] rc=[{rcs}] "
         f"rpy=({row['roll_rad']},{row['pitch_rad']},{row['yaw_rad']})"
+    )
+
+
+def print_ahrs_observer(row):
+    print(
+        "AHRS_OBS "
+        f"roll={row['att_roll_rad']} pitch={row['att_pitch_rad']} yaw={row['att_yaw_rad']} "
+        f"ahrs2_roll={row['ahrs2_roll_rad']} ahrs2_pitch={row['ahrs2_pitch_rad']} "
+        f"ahrs2_yaw={row['ahrs2_yaw_rad']} ekf_flags={row['ekf_flags']} "
+        f"pos_ned=({row['local_ned_x_m']},{row['local_ned_y_m']},{row['local_ned_z_m']})"
     )
 
 
@@ -1094,6 +1123,7 @@ def main():
                 writer.writerow(row)
                 csv_file.flush()
                 print_status(row)
+                print_ahrs_observer(row)
                 if gps_input_injector is not None and gps_input_static_enabled:
                     gps_input_injector.print_observer()
                 if airspeed_injector is not None:
