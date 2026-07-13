@@ -73,6 +73,21 @@ def static_gps_input_row(args):
     return row
 
 
+def blank_gps_input_log_row(enabled=False):
+    return {
+        "gps_input_enabled": int(enabled),
+        "gps_tx_lat_deg": "",
+        "gps_tx_lon_deg": "",
+        "gps_tx_alt_m": "",
+        "gps_tx_vn_mps": "",
+        "gps_tx_ve_mps": "",
+        "gps_tx_vd_mps": "",
+        "gps_tx_fix_type": "",
+        "gps_tx_satellites": "",
+        "gps_tx_count": 0,
+    }
+
+
 SAFETY_WARNING = """
 SR-75 LAYER 2 HIL BENCH SAFETY
 No live engine, no fuel pump, no live RATO ignition, no live ejection.
@@ -418,6 +433,8 @@ class GPSInputInjector:
         self.gps_input_invalid_count = 0
         self.gps_input_send_exception_count = 0
         self.next_debug_print = 0.0
+        self.last_packet = None
+        self.last_time_usec = 0
         self.gps_input_enabled = hasattr(master.mav, "gps_input_send")
         print(f"GPS_INPUT available: {'yes' if self.gps_input_enabled else 'no'}")
         if self.gps_input_enabled:
@@ -430,6 +447,9 @@ class GPSInputInjector:
         gps_week = int(seconds_since_gps_epoch // 604800)
         gps_week_ms = int((seconds_since_gps_epoch % 604800) * 1000)
         time_usec = int(unix_now * 1.0e6)
+        if time_usec <= self.last_time_usec:
+            time_usec = self.last_time_usec + 1
+        self.last_time_usec = time_usec
         return time_usec, gps_week_ms, gps_week
 
     def validate_packet(self, packet):
@@ -506,7 +526,7 @@ class GPSInputInjector:
             "speed_accuracy": 0.5,
             "horiz_accuracy": 1.0,
             "vert_accuracy": 1.5,
-            "satellites_visible": 10,
+            "satellites_visible": 12,
         }
         reasons = self.validate_packet(packet)
         self.maybe_print_debug(packet, reasons)
@@ -545,6 +565,7 @@ class GPSInputInjector:
             self.gps_input_sent_count += 1
         else:
             self.gps_input_dryrun_count += 1
+        self.last_packet = packet
         return True
 
     def print_status(self, last_jsb_t):
@@ -556,6 +577,34 @@ class GPSInputInjector:
 
     def print_static_status(self):
         print(f"GPS_INPUT_STATIC: sent={self.gps_input_sent_count} valid={self.gps_input_valid_count}")
+
+    def print_observer(self):
+        if self.last_packet is None:
+            return
+        packet = self.last_packet
+        print(
+            "GPS_TX "
+            f"lat={packet['lat_deg']:.7f} lon={packet['lon_deg']:.7f} alt={packet['alt']:.2f} "
+            f"vn={packet['vn']:.2f} ve={packet['ve']:.2f} vd={packet['vd']:.2f} "
+            f"fix={packet['fix_type']} sats={packet['satellites_visible']} count={self.gps_input_sent_count}"
+        )
+
+    def log_row(self):
+        row = blank_gps_input_log_row(True)
+        row["gps_tx_count"] = self.gps_input_sent_count
+        if self.last_packet is not None:
+            packet = self.last_packet
+            row.update({
+                "gps_tx_lat_deg": f"{packet['lat_deg']:.7f}",
+                "gps_tx_lon_deg": f"{packet['lon_deg']:.7f}",
+                "gps_tx_alt_m": f"{packet['alt']:.2f}",
+                "gps_tx_vn_mps": f"{packet['vn']:.2f}",
+                "gps_tx_ve_mps": f"{packet['ve']:.2f}",
+                "gps_tx_vd_mps": f"{packet['vd']:.2f}",
+                "gps_tx_fix_type": packet["fix_type"],
+                "gps_tx_satellites": packet["satellites_visible"],
+            })
+        return row
 
 
 def parse_args():
@@ -577,16 +626,20 @@ def parse_args():
     parser.add_argument("--hil-gps-rate-hz", type=float, default=5.0, help="HIL GPS injection rate")
     parser.add_argument("--hil-dry-run", action="store_true", help="Compute HIL messages but do not send them")
     parser.add_argument("--hil-max-stale-s", type=float, default=1.0, help="Maximum JSBSim CSV staleness before HIL pauses")
-    parser.add_argument("--gps-input-inject", action="store_true", help="Send JSBSim state to Pixhawk using MAVLink GPS_INPUT")
+    parser.add_argument("--gps-input-inject", action="store_true", help="Send stationary Layer 2D GPS_INPUT data to Pixhawk")
     parser.add_argument("--gps-input-rate-hz", type=float, default=5.0, help="GPS_INPUT injection rate")
+    parser.add_argument("--gps-rate-hz", dest="gps_input_rate_hz", type=float, default=argparse.SUPPRESS, help="Alias for --gps-input-rate-hz")
     parser.add_argument("--gps-input-dry-run", action="store_true", help="Compute GPS_INPUT messages but do not send them")
     parser.add_argument("--gps-input-id", type=int, default=0, help="GPS_INPUT gps_id field")
     parser.add_argument("--gps-input-ignore-flags", type=int, default=0, help="GPS_INPUT ignore_flags field")
     parser.add_argument("--gps-input-debug", action="store_true", help="Print one GPS_INPUT sample per second")
     parser.add_argument("--gps-input-static-test", action="store_true", help="Send static GPS_INPUT data independent of JSBSim CSV")
     parser.add_argument("--gps-input-static-lat", type=float, default=32.5378885, help="Static GPS_INPUT latitude")
+    parser.add_argument("--gps-lat", dest="gps_input_static_lat", type=float, default=argparse.SUPPRESS, help="Alias for --gps-input-static-lat")
     parser.add_argument("--gps-input-static-lon", type=float, default=74.3661944, help="Static GPS_INPUT longitude")
-    parser.add_argument("--gps-input-static-alt-m", type=float, default=1000.0, help="Static GPS_INPUT altitude in meters")
+    parser.add_argument("--gps-lon", dest="gps_input_static_lon", type=float, default=argparse.SUPPRESS, help="Alias for --gps-input-static-lon")
+    parser.add_argument("--gps-input-static-alt-m", type=float, default=240.2, help="Static GPS_INPUT altitude in meters")
+    parser.add_argument("--gps-alt-m", dest="gps_input_static_alt_m", type=float, default=argparse.SUPPRESS, help="Alias for --gps-input-static-alt-m")
     parser.add_argument("--gps-input-static-vn", type=float, default=0.0, help="Static GPS_INPUT north velocity in m/s")
     parser.add_argument("--gps-input-static-ve", type=float, default=0.0, help="Static GPS_INPUT east velocity in m/s")
     parser.add_argument("--gps-input-static-vd", type=float, default=0.0, help="Static GPS_INPUT down velocity in m/s")
@@ -668,7 +721,7 @@ def msg_fields(msg, prefix, count):
     return values
 
 
-def make_row(start_time, latest, jsbsim_row=None):
+def make_row(start_time, latest, jsbsim_row=None, gps_input_row=None):
     now = time.time()
     heartbeat = latest.get("HEARTBEAT")
     mode, armed = mode_and_armed(heartbeat)
@@ -704,6 +757,7 @@ def make_row(start_time, latest, jsbsim_row=None):
     row["groundspeed_mps"] = getattr(vfr_hud, "groundspeed", "")
     row["throttle_pct"] = getattr(vfr_hud, "throttle", "")
     row.update(jsbsim_row if jsbsim_row is not None else blank_jsbsim_row())
+    row.update(gps_input_row if gps_input_row is not None else blank_gps_input_log_row())
     return row
 
 
@@ -737,20 +791,27 @@ def print_pixhawk_nav_compare(row, latest):
 
     pix_lat = getattr(global_position, "lat", "") / 1.0e7 if global_position is not None else ""
     pix_lon = getattr(global_position, "lon", "") / 1.0e7 if global_position is not None else ""
-    pix_alt_m = getattr(global_position, "alt", "") / 1000.0 if global_position is not None else ""
-    pix_rel_alt_m = getattr(global_position, "relative_alt", "") / 1000.0 if global_position is not None else ""
+    global_alt_m = getattr(global_position, "alt", "") / 1000.0 if global_position is not None else ""
+    rel_alt_m = getattr(global_position, "relative_alt", "") / 1000.0 if global_position is not None else ""
+    gps_raw_alt_m = getattr(gps_raw, "alt", "") / 1000.0 if gps_raw is not None else ""
+    vfr_alt_m = getattr(vfr_hud, "alt", "") if vfr_hud is not None else ""
     pix_groundspeed = getattr(vfr_hud, "groundspeed", "")
     pix_heading = getattr(vfr_hud, "heading", "")
     gps_fix = getattr(gps_raw, "fix_type", "")
     gps_sats = getattr(gps_raw, "satellites_visible", "")
     ekf_flags = getattr(ekf_status, "flags", "")
+    jsb_alt_m = safe_float(row, "jsb_alt_m")
+    alt_error_global_m = global_alt_m - jsb_alt_m if global_alt_m != "" and jsb_alt_m is not None else ""
+    alt_error_gps_raw_m = gps_raw_alt_m - jsb_alt_m if gps_raw_alt_m != "" and jsb_alt_m is not None else ""
 
     print(
         "NAV_COMPARE: "
         f"jsb_lat={row['jsb_lat_deg']} jsb_lon={row['jsb_lon_deg']} "
-        f"jsb_alt_m={row['jsb_alt_m']} "
+        f"jsb_alt_m={row['jsb_alt_m']} gps_raw_alt_m={gps_raw_alt_m} "
+        f"global_alt_m={global_alt_m} rel_alt_m={rel_alt_m} vfr_alt_m={vfr_alt_m} "
+        f"alt_error_global_m={alt_error_global_m} alt_error_gps_raw_m={alt_error_gps_raw_m} "
         f"jsb_vn={row['jsb_vn_mps']} jsb_ve={row['jsb_ve_mps']} jsb_vd={row['jsb_vd_mps']} "
-        f"pix_lat={pix_lat} pix_lon={pix_lon} pix_alt_m={pix_alt_m} pix_rel_alt_m={pix_rel_alt_m} "
+        f"pix_lat={pix_lat} pix_lon={pix_lon} pix_alt_m={global_alt_m} pix_rel_alt_m={rel_alt_m} "
         f"pix_groundspeed={pix_groundspeed} pix_heading={pix_heading} "
         f"gps_fix={gps_fix} gps_sats={gps_sats} ekf_flags={ekf_flags}"
     )
@@ -782,15 +843,15 @@ def main():
         print("HIL injection: DISABLED")
         hil_injector = None
     gps_input_dry_run = args.gps_input_dry_run or args.hil_dry_run
+    gps_input_static_enabled = args.gps_input_inject or args.gps_input_static_test
     if args.gps_input_inject or args.gps_input_static_test:
-        print(f"GPS_INPUT injection: ENABLED at {args.gps_input_rate_hz:g} Hz")
-        if args.gps_input_static_test:
-            print(
-                "GPS_INPUT static test: ENABLED "
-                f"lat={args.gps_input_static_lat} lon={args.gps_input_static_lon} "
-                f"alt_m={args.gps_input_static_alt_m} "
-                f"vel_ned=({args.gps_input_static_vn},{args.gps_input_static_ve},{args.gps_input_static_vd})"
-            )
+        print("GPS_INPUT injection: ENABLED")
+        print(f"GPS_INPUT rate: {args.gps_input_rate_hz:g} Hz")
+        print(
+            "GPS_INPUT origin: "
+            f"lat={args.gps_input_static_lat} lon={args.gps_input_static_lon} "
+            f"alt={args.gps_input_static_alt_m} m"
+        )
         if gps_input_dry_run:
             print("GPS_INPUT dry-run: computing messages but not sending")
         gps_input_injector = GPSInputInjector(
@@ -802,6 +863,7 @@ def main():
             args.gps_input_debug,
         )
     else:
+        print("GPS_INPUT injection: DISABLED")
         gps_input_injector = None
     mp_in_sock = open_mp_in_socket(args.mp_in)
     mp_out_addr = parse_udp_endpoint(args.mp_out) if mp_in_sock is not None and args.mp_out is not None else None
@@ -866,24 +928,21 @@ def main():
                     next_hil_status = now + 1.0
 
             if gps_input_injector is not None:
-                if hil_injector is None and now >= next_gps_input_status:
-                    if args.gps_input_static_test:
-                        gps_input_injector.print_static_status()
-                    else:
-                        gps_input_injector.print_status(last_hil_jsb_t)
+                if hil_injector is None and not gps_input_static_enabled and now >= next_gps_input_status:
+                    gps_input_injector.print_status(last_hil_jsb_t)
                     next_gps_input_status = now + 1.0
 
             if hil_injector is not None or gps_input_injector is not None:
                 hil_state_due = now >= next_hil_state
                 hil_gps_due = now >= next_hil_gps
                 gps_input_due = now >= next_gps_input
-                if gps_input_injector is not None and args.gps_input_static_test and gps_input_due:
+                if gps_input_injector is not None and gps_input_static_enabled and gps_input_due:
                     gps_input_injector.send(static_gps_input_row(args))
                     next_gps_input = now + (1.0 / max(args.gps_input_rate_hz, 0.1))
                     gps_input_due = False
                 if jsbsim_monitor is not None and (
                     (hil_injector is not None and (hil_state_due or hil_gps_due)) or
-                    (gps_input_injector is not None and not args.gps_input_static_test and gps_input_due)
+                    (gps_input_injector is not None and not gps_input_static_enabled and gps_input_due)
                 ):
                     hil_row = jsbsim_monitor.read_latest()
                     hil_jsb_t = safe_float(hil_row, "jsb_time_s")
@@ -943,10 +1002,13 @@ def main():
 
             if now >= next_print:
                 jsbsim_row = jsbsim_monitor.read_latest() if jsbsim_monitor is not None else None
-                row = make_row(start_time, latest, jsbsim_row)
+                gps_input_row = gps_input_injector.log_row() if gps_input_injector is not None else None
+                row = make_row(start_time, latest, jsbsim_row, gps_input_row)
                 writer.writerow(row)
                 csv_file.flush()
                 print_status(row)
+                if gps_input_injector is not None and gps_input_static_enabled:
+                    gps_input_injector.print_observer()
                 if jsbsim_monitor is not None:
                     print_jsbsim_status(row)
                 if args.gps_input_inject or args.hil_inject:
