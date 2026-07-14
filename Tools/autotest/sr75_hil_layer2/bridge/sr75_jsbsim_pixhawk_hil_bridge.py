@@ -60,24 +60,68 @@ JSBSIM_FIELDS = [
 JSB_FEED_STALE_TIMEOUT_S = 2.0
 
 JSB_FEED_ALIASES = {
-    "jsb_feed_time_s": ("time_s", "jsb_time_s", "jsb_feed_time_s", "sim_time_s", "/fdm/jsbsim/simulation/sim-time-sec"),
-    "jsb_feed_lat_deg": ("lat_deg", "jsb_lat_deg", "jsb_feed_lat_deg", "/fdm/jsbsim/position/lat-gc-deg"),
-    "jsb_feed_lon_deg": ("lon_deg", "jsb_lon_deg", "long_deg", "jsb_long_deg", "jsb_feed_lon_deg", "/fdm/jsbsim/position/long-gc-deg"),
-    "jsb_feed_alt_m": ("alt_m", "jsb_alt_m", "altitude_m", "jsb_feed_alt_m", "/fdm/jsbsim/position/h-sl-ft"),
-    "jsb_feed_vn_mps": ("vn_mps", "jsb_vn_mps", "v_north_mps", "jsb_feed_vn_mps", "/fdm/jsbsim/velocities/v-north-fps"),
-    "jsb_feed_ve_mps": ("ve_mps", "jsb_ve_mps", "v_east_mps", "jsb_feed_ve_mps", "/fdm/jsbsim/velocities/v-east-fps"),
-    "jsb_feed_vd_mps": ("vd_mps", "jsb_vd_mps", "v_down_mps", "jsb_feed_vd_mps", "/fdm/jsbsim/velocities/v-down-fps"),
-    "jsb_feed_airspeed_mps": ("airspeed_mps", "jsb_airspeed_mps", "vt_mps", "jsb_feed_airspeed_mps", "/fdm/jsbsim/velocities/vt-fps"),
-    "jsb_feed_roll_rad": ("roll_rad", "phi_rad", "jsb_roll_rad", "jsb_feed_roll_rad", "phi_deg", "/fdm/jsbsim/attitude/phi-deg"),
-    "jsb_feed_pitch_rad": ("pitch_rad", "theta_rad", "jsb_pitch_rad", "jsb_feed_pitch_rad", "theta_deg", "/fdm/jsbsim/attitude/theta-rad"),
-    "jsb_feed_yaw_rad": ("yaw_rad", "psi_rad", "jsb_yaw_rad", "jsb_feed_yaw_rad", "psi_deg", "/fdm/jsbsim/attitude/psi-deg"),
+    "jsb_feed_time_s": (
+        "time_s", "jsb_time_s", "jsb_feed_time_s", "sim_time_s",
+        "simulation/sim-time-sec", "/fdm/jsbsim/simulation/sim-time-sec",
+    ),
+    "jsb_feed_lat_deg": (
+        "lat_deg", "jsb_lat_deg", "jsb_feed_lat_deg",
+        "position/lat-gc-deg", "/fdm/jsbsim/position/lat-gc-deg",
+    ),
+    "jsb_feed_lon_deg": (
+        "lon_deg", "jsb_lon_deg", "long_deg", "jsb_long_deg", "jsb_feed_lon_deg",
+        "position/long-gc-deg", "/fdm/jsbsim/position/long-gc-deg",
+    ),
+    "jsb_feed_alt_m": (
+        "alt_m", "jsb_alt_m", "altitude_m", "jsb_feed_alt_m",
+        "position/h-sl-ft", "/fdm/jsbsim/position/h-sl-ft",
+    ),
+    "jsb_feed_vn_mps": (
+        "vn_mps", "jsb_vn_mps", "v_north_mps", "jsb_feed_vn_mps",
+        "velocities/v-north-fps", "/fdm/jsbsim/velocities/v-north-fps",
+    ),
+    "jsb_feed_ve_mps": (
+        "ve_mps", "jsb_ve_mps", "v_east_mps", "jsb_feed_ve_mps",
+        "velocities/v-east-fps", "/fdm/jsbsim/velocities/v-east-fps",
+    ),
+    "jsb_feed_vd_mps": (
+        "vd_mps", "jsb_vd_mps", "v_down_mps", "jsb_feed_vd_mps",
+        "velocities/v-down-fps", "/fdm/jsbsim/velocities/v-down-fps",
+    ),
+    "jsb_feed_airspeed_mps": (
+        "airspeed_mps", "jsb_airspeed_mps", "vt_mps", "jsb_feed_airspeed_mps",
+        "velocities/vc-kts", "/fdm/jsbsim/velocities/vc-kts",
+        "velocities/vt-fps", "/fdm/jsbsim/velocities/vt-fps",
+    ),
+    "jsb_feed_roll_rad": (
+        "roll_rad", "phi_rad", "jsb_roll_rad", "jsb_feed_roll_rad", "phi_deg",
+        "attitude/phi-deg", "/fdm/jsbsim/attitude/phi-deg",
+    ),
+    "jsb_feed_pitch_rad": (
+        "pitch_rad", "theta_rad", "jsb_pitch_rad", "jsb_feed_pitch_rad", "theta_deg",
+        "attitude/theta-rad", "attitude/theta-deg", "/fdm/jsbsim/attitude/theta-rad",
+    ),
+    "jsb_feed_yaw_rad": (
+        "yaw_rad", "psi_rad", "jsb_yaw_rad", "jsb_feed_yaw_rad", "psi_deg",
+        "attitude/psi-deg", "/fdm/jsbsim/attitude/psi-deg",
+    ),
 }
 
 JSB_FEED_ALIAS_SCALES = {column_name: scale for _field_name, column_name, scale in JSBSIM_FIELDS}
 JSB_FEED_ALIAS_SCALES.update({
+    "position/h-sl-ft": 0.3048,
+    "velocities/v-north-fps": 0.3048,
+    "velocities/v-east-fps": 0.3048,
+    "velocities/v-down-fps": 0.3048,
+    "velocities/vc-kts": 0.514444,
+    "/fdm/jsbsim/velocities/vc-kts": 0.514444,
+    "velocities/vt-fps": 0.3048,
     "phi_deg": math.pi / 180.0,
     "theta_deg": math.pi / 180.0,
     "psi_deg": math.pi / 180.0,
+    "attitude/phi-deg": math.pi / 180.0,
+    "attitude/theta-deg": math.pi / 180.0,
+    "attitude/psi-deg": math.pi / 180.0,
 })
 
 JSB_FEED_TO_JSB_ROW = {

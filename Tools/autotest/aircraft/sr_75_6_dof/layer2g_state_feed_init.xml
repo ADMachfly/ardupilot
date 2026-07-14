@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<initialize name="SR75 Layer 2G state feed start">
+  <latitude unit="DEG">32.5378085</latitude>
+  <longitude unit="DEG">74.3661944</longitude>
+  <altitude unit="M">5000.0</altitude>
+  <vt unit="KTS">50.0</vt>
+  <gamma unit="DEG">0.0</gamma>
+  <psi unit="DEG">315.0</psi>
+  <phi unit="DEG">0.0</phi>
+  <theta unit="DEG">3.0</theta>
+</initialize>
