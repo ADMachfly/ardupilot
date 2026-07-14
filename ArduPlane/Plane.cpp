@@ -157,6 +157,9 @@ void Plane::get_scheduler_tasks(const AP_Scheduler::Task *&tasks,
 
 bool Plane::sr75_external_airspeed(float &airspeed_mps) const
 {
+    if (g2.sr75_arspd_enable <= 0) {
+        return false;
+    }
     if (!sr75_ext_airspeed_valid) {
         return false;
     }

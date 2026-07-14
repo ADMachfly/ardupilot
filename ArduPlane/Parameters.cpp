@@ -1292,6 +1292,14 @@ const AP_Param::GroupInfo ParametersG2::var_info[] = {
 #endif
 
     AP_SUBGROUPINFO(rato, "RATO_", 42, ParametersG2, RATOController),
+
+    // @Param: SR75_ARSPD_EN
+    // @DisplayName: SR75 external airspeed enable
+    // @Description: Enables SR75 bench external airspeed received over MAVLink NAMED_VALUE_FLOAT AIRSPEED for VFR_HUD reporting. This is disabled by default and intended only for SR75 external JSBSim HIL bench testing.
+    // @Values: 0:Disabled,1:Enabled
+    // @User: Advanced
+    AP_GROUPINFO("SR75_ARSPD_EN", 43, ParametersG2, sr75_arspd_enable, 0),
+
     AP_GROUPEND
 };
 

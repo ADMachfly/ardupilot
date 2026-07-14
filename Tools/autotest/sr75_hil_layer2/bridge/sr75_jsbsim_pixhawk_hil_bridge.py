@@ -931,13 +931,13 @@ class AirspeedInjector:
         self.airspeed_send_exception_count = 0
         self.last_airspeed_mps = ""
         self.airspeed_enabled = hasattr(master.mav, "named_value_float_send")
-        print(f"AIRSPEED MAVLink transmit message: NAMED_VALUE_FLOAT")
+        print(f"AIRSPEED MAVLink transmit message: NAMED_VALUE_FLOAT name=AIRSPEED")
         print(f"NAMED_VALUE_FLOAT available: {'yes' if self.airspeed_enabled else 'no'}")
         if self.airspeed_enabled:
             print(f"NAMED_VALUE_FLOAT send signature: {inspect.signature(master.mav.named_value_float_send)}")
         print(
-            "AIRSPEED Pixhawk consumption: not direct; inbound NAMED_VALUE_FLOAT "
-            "is logged by ArduPilot but not consumed by AP_Airspeed"
+            "AIRSPEED Pixhawk consumption: SR75 ArduPlane receiver updates VFR_HUD "
+            "when SR75_ARSPD_EN=1 and samples are fresh"
         )
 
     def validate(self, airspeed_mps=None):
@@ -975,7 +975,10 @@ class AirspeedInjector:
     def print_observer(self):
         if self.last_airspeed_mps == "":
             return
-        print(f"AS_TX airspeed={self.last_airspeed_mps:.2f} count={self.airspeed_tx_count}")
+        print(
+            f"AS_TX airspeed={self.last_airspeed_mps:.2f} count={self.airspeed_tx_count} "
+            "method=NAMED_VALUE_FLOAT/AIRSPEED pixhawk_expected=yes_if_SR75_ARSPD_EN=1"
+        )
 
     def log_row(self):
         row = blank_airspeed_log_row(True)
