@@ -1021,10 +1021,29 @@ static bool sr75_named_value_is(const char name[MAVLINK_MSG_NAMED_VALUE_FLOAT_FI
     return name[expected_len] == '\0';
 }
 
+static bool sr75_attitude_jump_invalid(bool current_valid,
+                                       uint32_t last_ms,
+                                       uint32_t now_ms,
+                                       uint32_t timeout_ms,
+                                       float jump_max_rad,
+                                       float current_rad,
+                                       float new_rad,
+                                       bool wrap_delta)
+{
+    if (!current_valid ||
+        now_ms - last_ms > timeout_ms) {
+        return false;
+    }
+
+    const float delta = wrap_delta ? wrap_PI(new_rad - current_rad) : new_rad - current_rad;
+    return fabsf(delta) > jump_max_rad;
+}
+
 bool GCS_MAVLINK_Plane::handle_sr75_named_value_float(const mavlink_message_t &msg)
 {
     mavlink_named_value_float_t packet;
     mavlink_msg_named_value_float_decode(&msg, &packet);
+    const uint32_t now_ms = AP_HAL::millis();
 
     if (sr75_named_value_is(packet.name, "AIRSPEED")) {
         const float airspeed_mps = packet.value;
@@ -1037,7 +1056,7 @@ bool GCS_MAVLINK_Plane::handle_sr75_named_value_float(const mavlink_message_t &m
         }
 
         plane.sr75_ext_airspeed_mps = airspeed_mps;
-        plane.sr75_ext_airspeed_last_ms = AP_HAL::millis();
+        plane.sr75_ext_airspeed_last_ms = now_ms;
         plane.sr75_ext_airspeed_valid = true;
         plane.sr75_ext_airspeed_rx_count++;
         return true;
@@ -1046,40 +1065,64 @@ bool GCS_MAVLINK_Plane::handle_sr75_named_value_float(const mavlink_message_t &m
     const float attitude_rad = packet.value;
     if (sr75_named_value_is(packet.name, "SR75_ROLL")) {
         if (!isfinite(attitude_rad) ||
-            fabsf(attitude_rad) > Plane::SR75_EXT_ROLL_PITCH_MAX_RAD) {
+            fabsf(attitude_rad) > Plane::SR75_EXT_ROLL_PITCH_MAX_RAD ||
+            sr75_attitude_jump_invalid(plane.sr75_ext_attitude_roll_valid,
+                                       plane.sr75_ext_attitude_last_ms,
+                                       now_ms,
+                                       Plane::SR75_EXT_ATTITUDE_TIMEOUT_MS,
+                                       Plane::SR75_EXT_ATTITUDE_JUMP_MAX_RAD,
+                                       plane.sr75_ext_roll_rad,
+                                       attitude_rad,
+                                       false)) {
             plane.sr75_ext_attitude_reject_count++;
             plane.sr75_ext_attitude_roll_valid = false;
             return true;
         }
         plane.sr75_ext_roll_rad = attitude_rad;
         plane.sr75_ext_attitude_roll_valid = true;
-        plane.sr75_ext_attitude_last_ms = AP_HAL::millis();
+        plane.sr75_ext_attitude_last_ms = now_ms;
         plane.sr75_ext_attitude_rx_count++;
         return true;
     }
     if (sr75_named_value_is(packet.name, "SR75_PITCH")) {
         if (!isfinite(attitude_rad) ||
-            fabsf(attitude_rad) > Plane::SR75_EXT_ROLL_PITCH_MAX_RAD) {
+            fabsf(attitude_rad) > Plane::SR75_EXT_ROLL_PITCH_MAX_RAD ||
+            sr75_attitude_jump_invalid(plane.sr75_ext_attitude_pitch_valid,
+                                       plane.sr75_ext_attitude_last_ms,
+                                       now_ms,
+                                       Plane::SR75_EXT_ATTITUDE_TIMEOUT_MS,
+                                       Plane::SR75_EXT_ATTITUDE_JUMP_MAX_RAD,
+                                       plane.sr75_ext_pitch_rad,
+                                       attitude_rad,
+                                       false)) {
             plane.sr75_ext_attitude_reject_count++;
             plane.sr75_ext_attitude_pitch_valid = false;
             return true;
         }
         plane.sr75_ext_pitch_rad = attitude_rad;
         plane.sr75_ext_attitude_pitch_valid = true;
-        plane.sr75_ext_attitude_last_ms = AP_HAL::millis();
+        plane.sr75_ext_attitude_last_ms = now_ms;
         plane.sr75_ext_attitude_rx_count++;
         return true;
     }
     if (sr75_named_value_is(packet.name, "SR75_YAW")) {
         if (!isfinite(attitude_rad) ||
-            fabsf(attitude_rad) > Plane::SR75_EXT_YAW_MAX_RAD) {
+            fabsf(attitude_rad) > Plane::SR75_EXT_YAW_MAX_RAD ||
+            sr75_attitude_jump_invalid(plane.sr75_ext_attitude_yaw_valid,
+                                       plane.sr75_ext_attitude_last_ms,
+                                       now_ms,
+                                       Plane::SR75_EXT_ATTITUDE_TIMEOUT_MS,
+                                       Plane::SR75_EXT_ATTITUDE_JUMP_MAX_RAD,
+                                       plane.sr75_ext_yaw_rad,
+                                       attitude_rad,
+                                       true)) {
             plane.sr75_ext_attitude_reject_count++;
             plane.sr75_ext_attitude_yaw_valid = false;
             return true;
         }
         plane.sr75_ext_yaw_rad = attitude_rad;
         plane.sr75_ext_attitude_yaw_valid = true;
-        plane.sr75_ext_attitude_last_ms = AP_HAL::millis();
+        plane.sr75_ext_attitude_last_ms = now_ms;
         plane.sr75_ext_attitude_rx_count++;
         return true;
     }

@@ -374,6 +374,7 @@ public:
 
         k_param_rato_controller = 274,
         k_param_sr75_arspd_enable,
+        k_param_sr75_att_enable,
 
     };
 
@@ -588,6 +589,7 @@ public:
     AP_Int32        oneshot_mask;
 
     AP_Int8         sr75_arspd_enable;
+    AP_Int8         sr75_att_enable;
     
     AP_Int8         axis_bitmask; // axes to be autotuned
 

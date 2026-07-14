@@ -172,6 +172,9 @@ bool Plane::sr75_external_airspeed(float &airspeed_mps) const
 
 bool Plane::sr75_external_attitude(float &roll_rad, float &pitch_rad, float &yaw_rad) const
 {
+    if (g2.sr75_att_enable <= 0) {
+        return false;
+    }
     if (!sr75_ext_attitude_roll_valid ||
         !sr75_ext_attitude_pitch_valid ||
         !sr75_ext_attitude_yaw_valid) {

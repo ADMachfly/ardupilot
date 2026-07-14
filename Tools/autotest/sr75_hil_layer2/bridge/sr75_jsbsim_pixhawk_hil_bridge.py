@@ -1008,10 +1008,14 @@ class AttitudeDisplayInjector:
         self.attitude_send_exception_count = 0
         self.last_sent = False
         self.attitude_enabled = hasattr(master.mav, "named_value_float_send")
-        print("ATTITUDE display MAVLink transmit message: NAMED_VALUE_FLOAT")
+        print("ATTITUDE display MAVLink transmit message: NAMED_VALUE_FLOAT names=SR75_ROLL/SR75_PITCH/SR75_YAW")
         print(f"NAMED_VALUE_FLOAT available: {'yes' if self.attitude_enabled else 'no'}")
         if self.attitude_enabled:
             print(f"NAMED_VALUE_FLOAT send signature: {inspect.signature(master.mav.named_value_float_send)}")
+        print(
+            "ATTITUDE Pixhawk consumption: SR75 ArduPlane receiver updates ATTITUDE telemetry "
+            "when SR75_ATT_EN=1 and samples are fresh"
+        )
 
     def values(self, attitude_rad=None):
         if attitude_rad is not None:
@@ -1075,7 +1079,8 @@ class AttitudeDisplayInjector:
         print(
             "ATT_TX "
             f"roll_deg={self.roll_deg:.2f} pitch_deg={self.pitch_deg:.2f} "
-            f"yaw_deg={self.yaw_deg:.2f} count={self.attitude_tx_count}"
+            f"yaw_deg={self.yaw_deg:.2f} count={self.attitude_tx_count} "
+            "method=NAMED_VALUE_FLOAT/SR75_ROLL_PITCH_YAW pixhawk_expected=yes_if_SR75_ATT_EN=1"
         )
 
     def log_row(self):

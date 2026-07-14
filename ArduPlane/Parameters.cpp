@@ -1300,6 +1300,13 @@ const AP_Param::GroupInfo ParametersG2::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("SR75_ARSPD_EN", 43, ParametersG2, sr75_arspd_enable, 0),
 
+    // @Param: SR75_ATT_EN
+    // @DisplayName: SR75 external attitude display enable
+    // @Description: Enables SR75 bench external attitude received over MAVLink NAMED_VALUE_FLOAT SR75_ROLL, SR75_PITCH, and SR75_YAW for ATTITUDE telemetry reporting. This is disabled by default and intended only for SR75 external JSBSim HIL bench testing.
+    // @Values: 0:Disabled,1:Enabled
+    // @User: Advanced
+    AP_GROUPINFO("SR75_ATT_EN", 44, ParametersG2, sr75_att_enable, 0),
+
     AP_GROUPEND
 };
 

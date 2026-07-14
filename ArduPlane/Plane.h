@@ -431,6 +431,7 @@ private:
     static constexpr uint32_t SR75_EXT_ATTITUDE_TIMEOUT_MS = 3000;
     static constexpr float SR75_EXT_ROLL_PITCH_MAX_RAD = 1.5708f;
     static constexpr float SR75_EXT_YAW_MAX_RAD = 3.1416f;
+    static constexpr float SR75_EXT_ATTITUDE_JUMP_MAX_RAD = 1.5708f;
 
     bool sr75_ext_attitude_roll_valid = false;
     bool sr75_ext_attitude_pitch_valid = false;
