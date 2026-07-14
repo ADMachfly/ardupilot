@@ -143,8 +143,18 @@ void GCS_MAVLINK_Plane::send_attitude() const
         p -= radians(plane.g.pitch_trim);
     }
 
+    float sr75_roll;
+    float sr75_pitch;
+    float sr75_yaw;
+    const bool have_sr75_attitude = plane.sr75_external_attitude(sr75_roll, sr75_pitch, sr75_yaw);
+    if (have_sr75_attitude) {
+        r = sr75_roll;
+        p = sr75_pitch;
+        y = sr75_yaw;
+    }
+
 #if HAL_QUADPLANE_ENABLED
-    if (plane.quadplane.show_vtol_view()) {
+    if (!have_sr75_attitude && plane.quadplane.show_vtol_view()) {
         r = plane.quadplane.ahrs_view->roll;
         p = plane.quadplane.ahrs_view->pitch;
         y = plane.quadplane.ahrs_view->yaw;
@@ -996,35 +1006,85 @@ void GCS_MAVLINK_Plane::handle_manual_control_axes(const mavlink_manual_control_
     manual_override(plane.channel_rudder, packet.r, 1000, 2000, tnow);
 }
 
+static bool sr75_named_value_is(const char name[MAVLINK_MSG_NAMED_VALUE_FLOAT_FIELD_NAME_LEN], const char *expected)
+{
+    const size_t expected_len = strlen(expected);
+    if (expected_len > MAVLINK_MSG_NAMED_VALUE_FLOAT_FIELD_NAME_LEN) {
+        return false;
+    }
+    if (strncmp(name, expected, expected_len) != 0) {
+        return false;
+    }
+    if (expected_len == MAVLINK_MSG_NAMED_VALUE_FLOAT_FIELD_NAME_LEN) {
+        return true;
+    }
+    return name[expected_len] == '\0';
+}
+
 bool GCS_MAVLINK_Plane::handle_sr75_named_value_float(const mavlink_message_t &msg)
 {
     mavlink_named_value_float_t packet;
     mavlink_msg_named_value_float_decode(&msg, &packet);
 
-    static constexpr char airspeed_name[] = "AIRSPEED";
-    static constexpr uint8_t airspeed_name_len = sizeof(airspeed_name) - 1;
-    static_assert(airspeed_name_len < MAVLINK_MSG_NAMED_VALUE_FLOAT_FIELD_NAME_LEN,
-                  "AIRSPEED name must fit in NAMED_VALUE_FLOAT name field");
+    if (sr75_named_value_is(packet.name, "AIRSPEED")) {
+        const float airspeed_mps = packet.value;
+        if (!isfinite(airspeed_mps) ||
+            is_negative(airspeed_mps) ||
+            airspeed_mps > Plane::SR75_EXT_AIRSPEED_MAX_MPS) {
+            plane.sr75_ext_airspeed_reject_count++;
+            plane.sr75_ext_airspeed_valid = false;
+            return true;
+        }
 
-    if (strncmp(packet.name, airspeed_name, airspeed_name_len) != 0 ||
-        packet.name[airspeed_name_len] != '\0') {
-        return false;
-    }
-
-    const float airspeed_mps = packet.value;
-    if (!isfinite(airspeed_mps) ||
-        is_negative(airspeed_mps) ||
-        airspeed_mps > Plane::SR75_EXT_AIRSPEED_MAX_MPS) {
-        plane.sr75_ext_airspeed_reject_count++;
-        plane.sr75_ext_airspeed_valid = false;
+        plane.sr75_ext_airspeed_mps = airspeed_mps;
+        plane.sr75_ext_airspeed_last_ms = AP_HAL::millis();
+        plane.sr75_ext_airspeed_valid = true;
+        plane.sr75_ext_airspeed_rx_count++;
         return true;
     }
 
-    plane.sr75_ext_airspeed_mps = airspeed_mps;
-    plane.sr75_ext_airspeed_last_ms = AP_HAL::millis();
-    plane.sr75_ext_airspeed_valid = true;
-    plane.sr75_ext_airspeed_rx_count++;
-    return true;
+    const float attitude_rad = packet.value;
+    if (sr75_named_value_is(packet.name, "SR75_ROLL")) {
+        if (!isfinite(attitude_rad) ||
+            fabsf(attitude_rad) > Plane::SR75_EXT_ROLL_PITCH_MAX_RAD) {
+            plane.sr75_ext_attitude_reject_count++;
+            plane.sr75_ext_attitude_roll_valid = false;
+            return true;
+        }
+        plane.sr75_ext_roll_rad = attitude_rad;
+        plane.sr75_ext_attitude_roll_valid = true;
+        plane.sr75_ext_attitude_last_ms = AP_HAL::millis();
+        plane.sr75_ext_attitude_rx_count++;
+        return true;
+    }
+    if (sr75_named_value_is(packet.name, "SR75_PITCH")) {
+        if (!isfinite(attitude_rad) ||
+            fabsf(attitude_rad) > Plane::SR75_EXT_ROLL_PITCH_MAX_RAD) {
+            plane.sr75_ext_attitude_reject_count++;
+            plane.sr75_ext_attitude_pitch_valid = false;
+            return true;
+        }
+        plane.sr75_ext_pitch_rad = attitude_rad;
+        plane.sr75_ext_attitude_pitch_valid = true;
+        plane.sr75_ext_attitude_last_ms = AP_HAL::millis();
+        plane.sr75_ext_attitude_rx_count++;
+        return true;
+    }
+    if (sr75_named_value_is(packet.name, "SR75_YAW")) {
+        if (!isfinite(attitude_rad) ||
+            fabsf(attitude_rad) > Plane::SR75_EXT_YAW_MAX_RAD) {
+            plane.sr75_ext_attitude_reject_count++;
+            plane.sr75_ext_attitude_yaw_valid = false;
+            return true;
+        }
+        plane.sr75_ext_yaw_rad = attitude_rad;
+        plane.sr75_ext_attitude_yaw_valid = true;
+        plane.sr75_ext_attitude_last_ms = AP_HAL::millis();
+        plane.sr75_ext_attitude_rx_count++;
+        return true;
+    }
+
+    return false;
 }
 
 void GCS_MAVLINK_Plane::handle_message(const mavlink_message_t &msg)

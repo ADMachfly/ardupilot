@@ -167,6 +167,22 @@ bool Plane::sr75_external_airspeed(float &airspeed_mps) const
     return true;
 }
 
+bool Plane::sr75_external_attitude(float &roll_rad, float &pitch_rad, float &yaw_rad) const
+{
+    if (!sr75_ext_attitude_roll_valid ||
+        !sr75_ext_attitude_pitch_valid ||
+        !sr75_ext_attitude_yaw_valid) {
+        return false;
+    }
+    if (AP_HAL::millis() - sr75_ext_attitude_last_ms > SR75_EXT_ATTITUDE_TIMEOUT_MS) {
+        return false;
+    }
+    roll_rad = sr75_ext_roll_rad;
+    pitch_rad = sr75_ext_pitch_rad;
+    yaw_rad = sr75_ext_yaw_rad;
+    return true;
+}
+
 #if HAL_QUADPLANE_ENABLED
 constexpr int8_t Plane::_failsafe_priorities[7];
 #else

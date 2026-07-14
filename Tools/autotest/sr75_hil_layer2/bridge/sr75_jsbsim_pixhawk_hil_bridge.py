@@ -99,6 +99,16 @@ def blank_airspeed_log_row(enabled=False):
     }
 
 
+def blank_attitude_log_row(enabled=False):
+    return {
+        "attitude_input_enabled": int(enabled),
+        "att_tx_roll_rad": "",
+        "att_tx_pitch_rad": "",
+        "att_tx_yaw_rad": "",
+        "att_tx_count": 0,
+    }
+
+
 SAFETY_WARNING = """
 SR-75 LAYER 2 HIL BENCH SAFETY
 No live engine, no fuel pump, no live RATO ignition, no live ejection.
@@ -679,6 +689,90 @@ class AirspeedInjector:
         return row
 
 
+class AttitudeDisplayInjector:
+    MAVLINK_NAMES = (
+        ("roll", b"SR75_ROLL"),
+        ("pitch", b"SR75_PITCH"),
+        ("yaw", b"SR75_YAW"),
+    )
+
+    def __init__(self, master, rate_hz, roll_deg, pitch_deg, yaw_deg):
+        self.master = master
+        self.rate_hz = rate_hz
+        self.roll_deg = roll_deg
+        self.pitch_deg = pitch_deg
+        self.yaw_deg = yaw_deg
+        self.roll_rad = math.radians(roll_deg)
+        self.pitch_rad = math.radians(pitch_deg)
+        self.yaw_rad = math.radians(yaw_deg)
+        self.attitude_tx_count = 0
+        self.attitude_send_exception_count = 0
+        self.last_sent = False
+        self.attitude_enabled = hasattr(master.mav, "named_value_float_send")
+        print("ATTITUDE display MAVLink transmit message: NAMED_VALUE_FLOAT")
+        print(f"NAMED_VALUE_FLOAT available: {'yes' if self.attitude_enabled else 'no'}")
+        if self.attitude_enabled:
+            print(f"NAMED_VALUE_FLOAT send signature: {inspect.signature(master.mav.named_value_float_send)}")
+
+    def validate(self):
+        for name, value in (
+            ("roll", self.roll_rad),
+            ("pitch", self.pitch_rad),
+            ("yaw", self.yaw_rad),
+        ):
+            if not math.isfinite(value):
+                return f"{name} is not finite"
+        return None
+
+    def send(self):
+        if not self.attitude_enabled:
+            return False
+        reason = self.validate()
+        if reason is not None:
+            print(f"ATTITUDE display invalid: {reason}")
+            return False
+        values = {
+            "roll": self.roll_rad,
+            "pitch": self.pitch_rad,
+            "yaw": self.yaw_rad,
+        }
+        try:
+            now_ms = int(time.monotonic() * 1000.0)
+            for value_name, mavlink_name in self.MAVLINK_NAMES:
+                self.master.mav.named_value_float_send(
+                    now_ms,
+                    mavlink_name,
+                    values[value_name],
+                )
+        except Exception as ex:
+            self.attitude_send_exception_count += 1
+            print(f"ATTITUDE display send exception: {ex}")
+            return False
+        self.attitude_tx_count += 1
+        self.last_sent = True
+        return True
+
+    def print_observer(self):
+        if not self.last_sent:
+            return
+        print(
+            "ATT_TX "
+            f"roll_deg={self.roll_deg:.2f} pitch_deg={self.pitch_deg:.2f} "
+            f"yaw_deg={self.yaw_deg:.2f} count={self.attitude_tx_count}"
+        )
+
+    def log_row(self):
+        row = blank_attitude_log_row(True)
+        row["att_tx_count"] = self.attitude_tx_count
+        if self.last_sent:
+            row.update({
+                "att_tx_roll_rad": f"{self.roll_rad:.7f}",
+                "att_tx_pitch_rad": f"{self.pitch_rad:.7f}",
+                "att_tx_yaw_rad": f"{self.yaw_rad:.7f}",
+            })
+        return row
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="SR-75 Layer 2 Pixhawk MAVLink HIL bridge skeleton"
@@ -718,6 +812,11 @@ def parse_args():
     parser.add_argument("--airspeed-inject", action="store_true", help="Transmit synthetic airspeed as MAVLink NAMED_VALUE_FLOAT")
     parser.add_argument("--airspeed-mps", type=float, default=69.0, help="Synthetic airspeed value in m/s")
     parser.add_argument("--airspeed-rate-hz", type=float, default=10.0, help="Synthetic airspeed transmit rate")
+    parser.add_argument("--attitude-inject", action="store_true", help="Transmit synthetic display attitude as MAVLink NAMED_VALUE_FLOAT")
+    parser.add_argument("--att-roll-deg", type=float, default=0.0, help="Synthetic display roll angle in degrees")
+    parser.add_argument("--att-pitch-deg", type=float, default=0.0, help="Synthetic display pitch angle in degrees")
+    parser.add_argument("--att-yaw-deg", type=float, default=0.0, help="Synthetic display yaw angle in degrees")
+    parser.add_argument("--attitude-rate-hz", type=float, default=10.0, help="Synthetic display attitude transmit rate")
     parser.add_argument("--log", default=default_log_path(), help="CSV log path")
     parser.add_argument(
         "--no-actuator-output",
@@ -799,7 +898,7 @@ def msg_fields(msg, prefix, count):
     return values
 
 
-def make_row(start_time, latest, jsbsim_row=None, gps_input_row=None, airspeed_input_row=None):
+def make_row(start_time, latest, jsbsim_row=None, gps_input_row=None, airspeed_input_row=None, attitude_input_row=None):
     now = time.time()
     heartbeat = latest.get("HEARTBEAT")
     mode, armed = mode_and_armed(heartbeat)
@@ -850,6 +949,7 @@ def make_row(start_time, latest, jsbsim_row=None, gps_input_row=None, airspeed_i
     row.update(jsbsim_row if jsbsim_row is not None else blank_jsbsim_row())
     row.update(gps_input_row if gps_input_row is not None else blank_gps_input_log_row())
     row.update(airspeed_input_row if airspeed_input_row is not None else blank_airspeed_log_row())
+    row.update(attitude_input_row if attitude_input_row is not None else blank_attitude_log_row())
     return row
 
 
@@ -975,6 +1075,25 @@ def main():
     else:
         print("AIRSPEED injection: DISABLED")
         airspeed_injector = None
+    if args.attitude_inject:
+        print("ATTITUDE display injection: ENABLED")
+        print(f"ATTITUDE rate: {args.attitude_rate_hz:g} Hz")
+        print(
+            "ATTITUDE value: "
+            f"roll={args.att_roll_deg:.2f} deg "
+            f"pitch={args.att_pitch_deg:.2f} deg "
+            f"yaw={args.att_yaw_deg:.2f} deg"
+        )
+        attitude_injector = AttitudeDisplayInjector(
+            master,
+            args.attitude_rate_hz,
+            args.att_roll_deg,
+            args.att_pitch_deg,
+            args.att_yaw_deg,
+        )
+    else:
+        print("ATTITUDE display injection: DISABLED")
+        attitude_injector = None
     mp_in_sock = open_mp_in_socket(args.mp_in)
     mp_out_addr = parse_udp_endpoint(args.mp_out) if mp_in_sock is not None and args.mp_out is not None else None
     mp_out = normalize_mp_out(args.mp_out)
@@ -999,6 +1118,7 @@ def main():
     next_gps_input = 0.0
     next_gps_input_status = 0.0
     next_airspeed = 0.0
+    next_attitude = 0.0
     last_hil_jsb_t = None
     last_hil_jsb_mtime = None
     last_hil_advance_wall = time.time()
@@ -1043,14 +1163,23 @@ def main():
                     gps_input_injector.print_status(last_hil_jsb_t)
                     next_gps_input_status = now + 1.0
 
-            if hil_injector is not None or gps_input_injector is not None or airspeed_injector is not None:
+            if (
+                hil_injector is not None or
+                gps_input_injector is not None or
+                airspeed_injector is not None or
+                attitude_injector is not None
+            ):
                 hil_state_due = now >= next_hil_state
                 hil_gps_due = now >= next_hil_gps
                 gps_input_due = now >= next_gps_input
                 airspeed_due = now >= next_airspeed
+                attitude_due = now >= next_attitude
                 if airspeed_injector is not None and airspeed_due:
                     airspeed_injector.send()
                     next_airspeed = now + (1.0 / max(args.airspeed_rate_hz, 0.1))
+                if attitude_injector is not None and attitude_due:
+                    attitude_injector.send()
+                    next_attitude = now + (1.0 / max(args.attitude_rate_hz, 0.1))
                 if gps_input_injector is not None and gps_input_static_enabled and gps_input_due:
                     gps_input_injector.send(static_gps_input_row(args))
                     next_gps_input = now + (1.0 / max(args.gps_input_rate_hz, 0.1))
@@ -1119,7 +1248,8 @@ def main():
                 jsbsim_row = jsbsim_monitor.read_latest() if jsbsim_monitor is not None else None
                 gps_input_row = gps_input_injector.log_row() if gps_input_injector is not None else None
                 airspeed_input_row = airspeed_injector.log_row() if airspeed_injector is not None else None
-                row = make_row(start_time, latest, jsbsim_row, gps_input_row, airspeed_input_row)
+                attitude_input_row = attitude_injector.log_row() if attitude_injector is not None else None
+                row = make_row(start_time, latest, jsbsim_row, gps_input_row, airspeed_input_row, attitude_input_row)
                 writer.writerow(row)
                 csv_file.flush()
                 print_status(row)
@@ -1128,6 +1258,8 @@ def main():
                     gps_input_injector.print_observer()
                 if airspeed_injector is not None:
                     airspeed_injector.print_observer()
+                if attitude_injector is not None:
+                    attitude_injector.print_observer()
                 if jsbsim_monitor is not None:
                     print_jsbsim_status(row)
                 if args.gps_input_inject or args.hil_inject:

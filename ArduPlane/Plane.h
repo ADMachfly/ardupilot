@@ -428,6 +428,22 @@ private:
 
     bool sr75_external_airspeed(float &airspeed_mps) const;
 
+    static constexpr uint32_t SR75_EXT_ATTITUDE_TIMEOUT_MS = 3000;
+    static constexpr float SR75_EXT_ROLL_PITCH_MAX_RAD = 1.5708f;
+    static constexpr float SR75_EXT_YAW_MAX_RAD = 3.1416f;
+
+    bool sr75_ext_attitude_roll_valid = false;
+    bool sr75_ext_attitude_pitch_valid = false;
+    bool sr75_ext_attitude_yaw_valid = false;
+    float sr75_ext_roll_rad = 0.0f;
+    float sr75_ext_pitch_rad = 0.0f;
+    float sr75_ext_yaw_rad = 0.0f;
+    uint32_t sr75_ext_attitude_last_ms = 0;
+    uint32_t sr75_ext_attitude_rx_count = 0;
+    uint32_t sr75_ext_attitude_reject_count = 0;
+
+    bool sr75_external_attitude(float &roll_rad, float &pitch_rad, float &yaw_rad) const;
+
     // The difference between current and desired airspeed.  Used in the pitch controller.  Meters per second.
     float airspeed_error;
 
