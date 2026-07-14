@@ -57,6 +57,43 @@ JSBSIM_FIELDS = [
     ("jsb_wdot_mps2", "/fdm/jsbsim/accelerations/wdot-ft_sec2", 0.3048),
 ]
 
+JSB_FEED_STALE_TIMEOUT_S = 2.0
+
+JSB_FEED_ALIASES = {
+    "jsb_feed_time_s": ("time_s", "jsb_time_s", "jsb_feed_time_s", "sim_time_s", "/fdm/jsbsim/simulation/sim-time-sec"),
+    "jsb_feed_lat_deg": ("lat_deg", "jsb_lat_deg", "jsb_feed_lat_deg", "/fdm/jsbsim/position/lat-gc-deg"),
+    "jsb_feed_lon_deg": ("lon_deg", "jsb_lon_deg", "long_deg", "jsb_long_deg", "jsb_feed_lon_deg", "/fdm/jsbsim/position/long-gc-deg"),
+    "jsb_feed_alt_m": ("alt_m", "jsb_alt_m", "altitude_m", "jsb_feed_alt_m", "/fdm/jsbsim/position/h-sl-ft"),
+    "jsb_feed_vn_mps": ("vn_mps", "jsb_vn_mps", "v_north_mps", "jsb_feed_vn_mps", "/fdm/jsbsim/velocities/v-north-fps"),
+    "jsb_feed_ve_mps": ("ve_mps", "jsb_ve_mps", "v_east_mps", "jsb_feed_ve_mps", "/fdm/jsbsim/velocities/v-east-fps"),
+    "jsb_feed_vd_mps": ("vd_mps", "jsb_vd_mps", "v_down_mps", "jsb_feed_vd_mps", "/fdm/jsbsim/velocities/v-down-fps"),
+    "jsb_feed_airspeed_mps": ("airspeed_mps", "jsb_airspeed_mps", "vt_mps", "jsb_feed_airspeed_mps", "/fdm/jsbsim/velocities/vt-fps"),
+    "jsb_feed_roll_rad": ("roll_rad", "phi_rad", "jsb_roll_rad", "jsb_feed_roll_rad", "phi_deg", "/fdm/jsbsim/attitude/phi-deg"),
+    "jsb_feed_pitch_rad": ("pitch_rad", "theta_rad", "jsb_pitch_rad", "jsb_feed_pitch_rad", "theta_deg", "/fdm/jsbsim/attitude/theta-rad"),
+    "jsb_feed_yaw_rad": ("yaw_rad", "psi_rad", "jsb_yaw_rad", "jsb_feed_yaw_rad", "psi_deg", "/fdm/jsbsim/attitude/psi-deg"),
+}
+
+JSB_FEED_ALIAS_SCALES = {column_name: scale for _field_name, column_name, scale in JSBSIM_FIELDS}
+JSB_FEED_ALIAS_SCALES.update({
+    "phi_deg": math.pi / 180.0,
+    "theta_deg": math.pi / 180.0,
+    "psi_deg": math.pi / 180.0,
+})
+
+JSB_FEED_TO_JSB_ROW = {
+    "jsb_feed_time_s": "jsb_time_s",
+    "jsb_feed_lat_deg": "jsb_lat_deg",
+    "jsb_feed_lon_deg": "jsb_lon_deg",
+    "jsb_feed_alt_m": "jsb_alt_m",
+    "jsb_feed_vn_mps": "jsb_vn_mps",
+    "jsb_feed_ve_mps": "jsb_ve_mps",
+    "jsb_feed_vd_mps": "jsb_vd_mps",
+    "jsb_feed_airspeed_mps": "jsb_airspeed_mps",
+    "jsb_feed_roll_rad": "jsb_roll_rad",
+    "jsb_feed_pitch_rad": "jsb_pitch_rad",
+    "jsb_feed_yaw_rad": "jsb_yaw_rad",
+}
+
 
 def blank_jsbsim_row():
     return {field_name: "" for field_name, _column_name, _scale in JSBSIM_FIELDS}
@@ -106,6 +143,23 @@ def blank_attitude_log_row(enabled=False):
         "att_tx_pitch_rad": "",
         "att_tx_yaw_rad": "",
         "att_tx_count": 0,
+    }
+
+
+def blank_jsb_feed_log_row(enabled=False):
+    return {
+        "jsb_feed_enabled": int(enabled),
+        "jsb_feed_time_s": "",
+        "jsb_feed_lat_deg": "",
+        "jsb_feed_lon_deg": "",
+        "jsb_feed_alt_m": "",
+        "jsb_feed_vn_mps": "",
+        "jsb_feed_ve_mps": "",
+        "jsb_feed_vd_mps": "",
+        "jsb_feed_airspeed_mps": "",
+        "jsb_feed_roll_rad": "",
+        "jsb_feed_pitch_rad": "",
+        "jsb_feed_yaw_rad": "",
     }
 
 
@@ -222,6 +276,200 @@ class JSBSimCSVMonitor:
             except (ValueError, IndexError):
                 row[field_name] = ""
         return row
+
+
+def normalize_header_name(name):
+    return name.strip().lower()
+
+
+def normalize_yaw_rad(yaw_rad):
+    return (yaw_rad + math.pi) % (2.0 * math.pi) - math.pi
+
+
+class JSBSimStateFeeder:
+    def __init__(self, path, stale_timeout_s=JSB_FEED_STALE_TIMEOUT_S):
+        self.path = path
+        self.stale_timeout_s = stale_timeout_s
+        self.monitor = JSBSimCSVMonitor(path)
+        self.headers_reported = False
+        self.warning_keys = set()
+        self.last_valid_feed_row = None
+        self.last_valid_jsb_row = None
+        self.last_valid_wall = None
+        self.last_feed_time_s = None
+        self.last_source_mtime = None
+        self.stale_reported = False
+
+    def _warn_once(self, key, message):
+        if key in self.warning_keys:
+            return
+        self.warning_keys.add(key)
+        print(message)
+
+    def _header_index(self):
+        if self.monitor.headers is None:
+            self.monitor._read_header()
+        if not self.monitor.headers:
+            return {}
+        return {normalize_header_name(name): index for index, name in enumerate(self.monitor.headers)}
+
+    def _read_raw_latest(self):
+        header_index = self._header_index()
+        if not header_index:
+            self._warn_once("header", f"Warning: JSBSim state input has no readable header: {self.path}")
+            return None
+        if not self.headers_reported:
+            print("JSBSim state input columns: " + ", ".join(self.monitor.headers))
+            self.headers_reported = True
+
+        last_line = self.monitor._read_last_line()
+        if last_line is None:
+            self._warn_once("row", f"Warning: JSBSim state input has no data rows yet: {self.path}")
+            return None
+        parsed_rows = list(csv.reader([last_line]))
+        if not parsed_rows:
+            return None
+        values = parsed_rows[0]
+
+        raw = {}
+        for field_name, aliases in JSB_FEED_ALIASES.items():
+            value = ""
+            for alias in aliases:
+                index = header_index.get(normalize_header_name(alias))
+                if index is None:
+                    continue
+                try:
+                    value = values[index]
+                except IndexError:
+                    value = ""
+                scale = JSB_FEED_ALIAS_SCALES.get(alias)
+                if scale is not None and value != "":
+                    try:
+                        value = float(value) * scale
+                    except (TypeError, ValueError):
+                        pass
+                break
+            raw[field_name] = value
+        return raw
+
+    def _parse_float(self, raw, field_name, default=None, required=False):
+        value = raw.get(field_name, "")
+        if value == "":
+            if required:
+                self._warn_once(field_name, f"Warning: JSBSim state input missing required field {field_name}")
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            self._warn_once(field_name, f"Warning: JSBSim state input field {field_name} is not numeric: {value}")
+            return default
+
+    def _validate(self, feed_row):
+        reasons = []
+        lat = feed_row["jsb_feed_lat_deg"]
+        lon = feed_row["jsb_feed_lon_deg"]
+        alt = feed_row["jsb_feed_alt_m"]
+        airspeed = feed_row["jsb_feed_airspeed_mps"]
+        roll = feed_row["jsb_feed_roll_rad"]
+        pitch = feed_row["jsb_feed_pitch_rad"]
+        yaw = feed_row["jsb_feed_yaw_rad"]
+        if not math.isfinite(lat) or lat < -90.0 or lat > 90.0:
+            reasons.append(f"latitude out of range: {lat}")
+        if not math.isfinite(lon) or lon < -180.0 or lon > 180.0:
+            reasons.append(f"longitude out of range: {lon}")
+        if not math.isfinite(alt):
+            reasons.append(f"altitude not finite: {alt}")
+        for field_name in ("jsb_feed_vn_mps", "jsb_feed_ve_mps", "jsb_feed_vd_mps"):
+            value = feed_row[field_name]
+            if not math.isfinite(value):
+                reasons.append(f"{field_name} not finite: {value}")
+        if not math.isfinite(airspeed) or airspeed < 0.0 or airspeed > 150.0:
+            reasons.append(f"airspeed out of range: {airspeed}")
+        if not math.isfinite(roll) or abs(roll) > math.pi * 0.5:
+            reasons.append(f"roll out of range: {roll}")
+        if not math.isfinite(pitch) or abs(pitch) > math.pi * 0.5:
+            reasons.append(f"pitch out of range: {pitch}")
+        if not math.isfinite(yaw):
+            reasons.append(f"yaw not finite: {yaw}")
+        return reasons
+
+    def _format_feed_row(self, feed_row):
+        row = blank_jsb_feed_log_row(True)
+        for field_name, value in feed_row.items():
+            if field_name == "jsb_feed_time_s":
+                row[field_name] = f"{value:.3f}" if value != "" else ""
+            elif field_name in row:
+                row[field_name] = f"{value:.7f}" if value != "" else ""
+        return row
+
+    def _jsb_row_from_feed(self, feed_row):
+        row = blank_jsbsim_row()
+        for feed_field, jsb_field in JSB_FEED_TO_JSB_ROW.items():
+            row[jsb_field] = feed_row[feed_field]
+        return row
+
+    def read_latest(self, args):
+        raw = self._read_raw_latest()
+        if raw is None:
+            return self.last_valid_jsb_row
+
+        feed_row = {
+            "jsb_feed_time_s": self._parse_float(raw, "jsb_feed_time_s", time.monotonic()),
+            "jsb_feed_lat_deg": self._parse_float(raw, "jsb_feed_lat_deg", math.nan, required=True),
+            "jsb_feed_lon_deg": self._parse_float(raw, "jsb_feed_lon_deg", math.nan, required=True),
+            "jsb_feed_alt_m": self._parse_float(raw, "jsb_feed_alt_m", math.nan, required=True),
+            "jsb_feed_vn_mps": self._parse_float(raw, "jsb_feed_vn_mps", args.gps_input_static_vn),
+            "jsb_feed_ve_mps": self._parse_float(raw, "jsb_feed_ve_mps", args.gps_input_static_ve),
+            "jsb_feed_vd_mps": self._parse_float(raw, "jsb_feed_vd_mps", args.gps_input_static_vd),
+            "jsb_feed_airspeed_mps": self._parse_float(raw, "jsb_feed_airspeed_mps", math.nan, required=True),
+            "jsb_feed_roll_rad": self._parse_float(raw, "jsb_feed_roll_rad", math.nan, required=True),
+            "jsb_feed_pitch_rad": self._parse_float(raw, "jsb_feed_pitch_rad", math.nan, required=True),
+            "jsb_feed_yaw_rad": normalize_yaw_rad(self._parse_float(raw, "jsb_feed_yaw_rad", math.nan, required=True)),
+        }
+        reasons = self._validate(feed_row)
+        if reasons:
+            self._warn_once("invalid", "Warning: JSBSim state input invalid: " + "; ".join(reasons))
+            return self.last_valid_jsb_row
+
+        source_mtime = self.monitor.mtime()
+        data_advanced = (
+            self.last_valid_wall is None or
+            feed_row["jsb_feed_time_s"] != self.last_feed_time_s or
+            source_mtime != self.last_source_mtime
+        )
+        self.last_valid_feed_row = self._format_feed_row(feed_row)
+        self.last_valid_jsb_row = self._jsb_row_from_feed(feed_row)
+        self.last_feed_time_s = feed_row["jsb_feed_time_s"]
+        self.last_source_mtime = source_mtime
+        if data_advanced:
+            self.last_valid_wall = time.time()
+            self.stale_reported = False
+        return self.last_valid_jsb_row
+
+    def log_row(self):
+        if self.last_valid_feed_row is None:
+            return blank_jsb_feed_log_row(True)
+        return dict(self.last_valid_feed_row)
+
+    def is_stale(self):
+        return self.last_valid_wall is not None and time.time() - self.last_valid_wall > self.stale_timeout_s
+
+    def maybe_print_stale(self):
+        if self.is_stale() and not self.stale_reported:
+            print(f"Warning: JSBSim state input stale for more than {self.stale_timeout_s:.1f}s")
+            self.stale_reported = True
+
+    def print_observer(self):
+        if self.last_valid_feed_row is None:
+            return
+        self.maybe_print_stale()
+        row = self.last_valid_feed_row
+        print(
+            "JSB_FEED "
+            f"t={row['jsb_feed_time_s']} lat={row['jsb_feed_lat_deg']} lon={row['jsb_feed_lon_deg']} "
+            f"alt={row['jsb_feed_alt_m']} airspeed={row['jsb_feed_airspeed_mps']} "
+            f"roll={row['jsb_feed_roll_rad']} pitch={row['jsb_feed_pitch_rad']} yaw={row['jsb_feed_yaw_rad']}"
+        )
 
 
 def remove_old_jsbsim_outputs(root):
@@ -648,17 +896,21 @@ class AirspeedInjector:
             "is logged by ArduPilot but not consumed by AP_Airspeed"
         )
 
-    def validate(self):
-        if not math.isfinite(self.airspeed_mps):
+    def validate(self, airspeed_mps=None):
+        value = self.airspeed_mps if airspeed_mps is None else airspeed_mps
+        if not math.isfinite(value):
             return "airspeed is not finite"
-        if self.airspeed_mps < 0.0:
+        if value < 0.0:
             return "airspeed is negative"
+        if value > 150.0:
+            return "airspeed is above 150 m/s"
         return None
 
-    def send(self):
+    def send(self, airspeed_mps=None):
         if not self.airspeed_enabled:
             return False
-        reason = self.validate()
+        value = self.airspeed_mps if airspeed_mps is None else airspeed_mps
+        reason = self.validate(value)
         if reason is not None:
             print(f"AIRSPEED invalid: {reason}")
             return False
@@ -666,14 +918,14 @@ class AirspeedInjector:
             self.master.mav.named_value_float_send(
                 int(time.monotonic() * 1000.0),
                 self.MAVLINK_NAME,
-                self.airspeed_mps,
+                value,
             )
         except Exception as ex:
             self.airspeed_send_exception_count += 1
             print(f"AIRSPEED send exception: {ex}")
             return False
         self.airspeed_tx_count += 1
-        self.last_airspeed_mps = self.airspeed_mps
+        self.last_airspeed_mps = value
         return True
 
     def print_observer(self):
@@ -714,28 +966,40 @@ class AttitudeDisplayInjector:
         if self.attitude_enabled:
             print(f"NAMED_VALUE_FLOAT send signature: {inspect.signature(master.mav.named_value_float_send)}")
 
-    def validate(self):
-        for name, value in (
-            ("roll", self.roll_rad),
-            ("pitch", self.pitch_rad),
-            ("yaw", self.yaw_rad),
-        ):
-            if not math.isfinite(value):
-                return f"{name} is not finite"
-        return None
-
-    def send(self):
-        if not self.attitude_enabled:
-            return False
-        reason = self.validate()
-        if reason is not None:
-            print(f"ATTITUDE display invalid: {reason}")
-            return False
-        values = {
+    def values(self, attitude_rad=None):
+        if attitude_rad is not None:
+            return attitude_rad
+        return {
             "roll": self.roll_rad,
             "pitch": self.pitch_rad,
             "yaw": self.yaw_rad,
         }
+
+    def validate(self, attitude_rad=None):
+        values = self.values(attitude_rad)
+        for name, value in (
+            ("roll", values["roll"]),
+            ("pitch", values["pitch"]),
+            ("yaw", values["yaw"]),
+        ):
+            if not math.isfinite(value):
+                return f"{name} is not finite"
+        if abs(values["roll"]) > math.pi * 0.5:
+            return "roll is outside +/-90 deg"
+        if abs(values["pitch"]) > math.pi * 0.5:
+            return "pitch is outside +/-90 deg"
+        if abs(values["yaw"]) > math.pi:
+            return "yaw is outside +/-pi"
+        return None
+
+    def send(self, attitude_rad=None):
+        if not self.attitude_enabled:
+            return False
+        values = self.values(attitude_rad)
+        reason = self.validate(values)
+        if reason is not None:
+            print(f"ATTITUDE display invalid: {reason}")
+            return False
         try:
             now_ms = int(time.monotonic() * 1000.0)
             for value_name, mavlink_name in self.MAVLINK_NAMES:
@@ -750,6 +1014,12 @@ class AttitudeDisplayInjector:
             return False
         self.attitude_tx_count += 1
         self.last_sent = True
+        self.roll_rad = values["roll"]
+        self.pitch_rad = values["pitch"]
+        self.yaw_rad = values["yaw"]
+        self.roll_deg = math.degrees(values["roll"])
+        self.pitch_deg = math.degrees(values["pitch"])
+        self.yaw_deg = math.degrees(values["yaw"])
         return True
 
     def print_observer(self):
@@ -782,6 +1052,7 @@ def parse_args():
     parser.add_argument("--mp-out", default=None, help="Optional Mission Planner MAVLink output, e.g. udp:192.168.1.20:14550")
     parser.add_argument("--mp-in", default=None, help="Optional Mission Planner MAVLink input, e.g. udp:0.0.0.0:14551")
     parser.add_argument("--jsbsim-csv", default=None, help="Optional read-only JSBSim CSV monitor path")
+    parser.add_argument("--jsbsim-state-input", default=None, help="Drive GPS_INPUT, AIRSPEED, and display attitude from a JSBSim state CSV path")
     parser.add_argument("--jsbsim-read-only", action="store_true", help="Monitor JSBSim CSV without commanding JSBSim")
     parser.add_argument("--jsbsim-script", default=None, help="Optional JSBSim script path, relative to --jsbsim-root")
     parser.add_argument("--jsbsim-root", default=default_jsbsim_root(), help="JSBSim root directory")
@@ -898,7 +1169,15 @@ def msg_fields(msg, prefix, count):
     return values
 
 
-def make_row(start_time, latest, jsbsim_row=None, gps_input_row=None, airspeed_input_row=None, attitude_input_row=None):
+def make_row(
+    start_time,
+    latest,
+    jsbsim_row=None,
+    gps_input_row=None,
+    airspeed_input_row=None,
+    attitude_input_row=None,
+    jsb_feed_row=None,
+):
     now = time.time()
     heartbeat = latest.get("HEARTBEAT")
     mode, armed = mode_and_armed(heartbeat)
@@ -950,6 +1229,7 @@ def make_row(start_time, latest, jsbsim_row=None, gps_input_row=None, airspeed_i
     row.update(gps_input_row if gps_input_row is not None else blank_gps_input_log_row())
     row.update(airspeed_input_row if airspeed_input_row is not None else blank_airspeed_log_row())
     row.update(attitude_input_row if attitude_input_row is not None else blank_attitude_log_row())
+    row.update(jsb_feed_row if jsb_feed_row is not None else blank_jsb_feed_log_row())
     return row
 
 
@@ -1029,6 +1309,11 @@ def main():
     jsbsim_monitor = JSBSimCSVMonitor(args.jsbsim_csv) if args.jsbsim_csv is not None else None
     if jsbsim_monitor is not None:
         print(f"JSBSim CSV monitoring: {args.jsbsim_csv} (read-only)")
+    jsb_state_feeder = JSBSimStateFeeder(args.jsbsim_state_input) if args.jsbsim_state_input is not None else None
+    if jsb_state_feeder is not None:
+        print(f"JSBSim state input: ENABLED path={args.jsbsim_state_input}")
+    else:
+        print("JSBSim state input: DISABLED")
     jsbsim_proc = start_jsbsim_subprocess(args)
     jsbsim_exit_reported = False
 
@@ -1045,15 +1330,19 @@ def main():
         print("HIL injection: DISABLED")
         hil_injector = None
     gps_input_dry_run = args.gps_input_dry_run or args.hil_dry_run
-    gps_input_static_enabled = args.gps_input_inject or args.gps_input_static_test
-    if args.gps_input_inject or args.gps_input_static_test:
+    gps_input_enabled = args.gps_input_inject or args.gps_input_static_test or jsb_state_feeder is not None
+    gps_input_static_enabled = (args.gps_input_inject or args.gps_input_static_test) and jsb_state_feeder is None
+    if gps_input_enabled:
         print("GPS_INPUT injection: ENABLED")
         print(f"GPS_INPUT rate: {args.gps_input_rate_hz:g} Hz")
-        print(
-            "GPS_INPUT origin: "
-            f"lat={args.gps_input_static_lat} lon={args.gps_input_static_lon} "
-            f"alt={args.gps_input_static_alt_m} m"
-        )
+        if jsb_state_feeder is not None:
+            print("GPS_INPUT origin: JSBSim state input")
+        else:
+            print(
+                "GPS_INPUT origin: "
+                f"lat={args.gps_input_static_lat} lon={args.gps_input_static_lon} "
+                f"alt={args.gps_input_static_alt_m} m"
+            )
         if gps_input_dry_run:
             print("GPS_INPUT dry-run: computing messages but not sending")
         gps_input_injector = GPSInputInjector(
@@ -1067,23 +1356,31 @@ def main():
     else:
         print("GPS_INPUT injection: DISABLED")
         gps_input_injector = None
-    if args.airspeed_inject:
+    airspeed_enabled = args.airspeed_inject or jsb_state_feeder is not None
+    if airspeed_enabled:
         print("AIRSPEED injection: ENABLED")
         print(f"AIRSPEED rate: {args.airspeed_rate_hz:g} Hz")
-        print(f"AIRSPEED value: {args.airspeed_mps:.1f} m/s")
+        if jsb_state_feeder is not None:
+            print("AIRSPEED value: JSBSim state input")
+        else:
+            print(f"AIRSPEED value: {args.airspeed_mps:.1f} m/s")
         airspeed_injector = AirspeedInjector(master, args.airspeed_rate_hz, args.airspeed_mps)
     else:
         print("AIRSPEED injection: DISABLED")
         airspeed_injector = None
-    if args.attitude_inject:
+    attitude_enabled = args.attitude_inject or jsb_state_feeder is not None
+    if attitude_enabled:
         print("ATTITUDE display injection: ENABLED")
         print(f"ATTITUDE rate: {args.attitude_rate_hz:g} Hz")
-        print(
-            "ATTITUDE value: "
-            f"roll={args.att_roll_deg:.2f} deg "
-            f"pitch={args.att_pitch_deg:.2f} deg "
-            f"yaw={args.att_yaw_deg:.2f} deg"
-        )
+        if jsb_state_feeder is not None:
+            print("ATTITUDE value: JSBSim state input")
+        else:
+            print(
+                "ATTITUDE value: "
+                f"roll={args.att_roll_deg:.2f} deg "
+                f"pitch={args.att_pitch_deg:.2f} deg "
+                f"yaw={args.att_yaw_deg:.2f} deg"
+            )
         attitude_injector = AttitudeDisplayInjector(
             master,
             args.attitude_rate_hz,
@@ -1174,12 +1471,30 @@ def main():
                 gps_input_due = now >= next_gps_input
                 airspeed_due = now >= next_airspeed
                 attitude_due = now >= next_attitude
+                jsb_feed_send_row = None
+                if jsb_state_feeder is not None and (gps_input_due or airspeed_due or attitude_due):
+                    jsb_feed_send_row = jsb_state_feeder.read_latest(args)
+                    jsb_state_feeder.maybe_print_stale()
                 if airspeed_injector is not None and airspeed_due:
-                    airspeed_injector.send()
+                    if jsb_state_feeder is None or jsb_feed_send_row is not None:
+                        airspeed = safe_float(jsb_feed_send_row, "jsb_airspeed_mps") if jsb_feed_send_row is not None else None
+                        airspeed_injector.send(airspeed)
                     next_airspeed = now + (1.0 / max(args.airspeed_rate_hz, 0.1))
                 if attitude_injector is not None and attitude_due:
-                    attitude_injector.send()
+                    if jsb_state_feeder is None or jsb_feed_send_row is not None:
+                        attitude_rad = None
+                        if jsb_feed_send_row is not None:
+                            attitude_rad = {
+                                "roll": safe_float(jsb_feed_send_row, "jsb_roll_rad", 0.0),
+                                "pitch": safe_float(jsb_feed_send_row, "jsb_pitch_rad", 0.0),
+                                "yaw": safe_float(jsb_feed_send_row, "jsb_yaw_rad", 0.0),
+                            }
+                        attitude_injector.send(attitude_rad)
                     next_attitude = now + (1.0 / max(args.attitude_rate_hz, 0.1))
+                if gps_input_injector is not None and jsb_feed_send_row is not None and gps_input_due:
+                    gps_input_injector.send(jsb_feed_send_row)
+                    next_gps_input = now + (1.0 / max(args.gps_input_rate_hz, 0.1))
+                    gps_input_due = False
                 if gps_input_injector is not None and gps_input_static_enabled and gps_input_due:
                     gps_input_injector.send(static_gps_input_row(args))
                     next_gps_input = now + (1.0 / max(args.gps_input_rate_hz, 0.1))
@@ -1245,24 +1560,41 @@ def main():
                         master.write(data)
 
             if now >= next_print:
-                jsbsim_row = jsbsim_monitor.read_latest() if jsbsim_monitor is not None else None
+                jsb_feed_row = None
+                feed_jsbsim_row = None
+                if jsb_state_feeder is not None:
+                    feed_jsbsim_row = jsb_state_feeder.read_latest(args)
+                    jsb_feed_row = jsb_state_feeder.log_row()
+                jsbsim_row = feed_jsbsim_row if feed_jsbsim_row is not None else (
+                    jsbsim_monitor.read_latest() if jsbsim_monitor is not None else None
+                )
                 gps_input_row = gps_input_injector.log_row() if gps_input_injector is not None else None
                 airspeed_input_row = airspeed_injector.log_row() if airspeed_injector is not None else None
                 attitude_input_row = attitude_injector.log_row() if attitude_injector is not None else None
-                row = make_row(start_time, latest, jsbsim_row, gps_input_row, airspeed_input_row, attitude_input_row)
+                row = make_row(
+                    start_time,
+                    latest,
+                    jsbsim_row,
+                    gps_input_row,
+                    airspeed_input_row,
+                    attitude_input_row,
+                    jsb_feed_row,
+                )
                 writer.writerow(row)
                 csv_file.flush()
                 print_status(row)
                 print_ahrs_observer(row)
-                if gps_input_injector is not None and gps_input_static_enabled:
+                if gps_input_injector is not None and (gps_input_static_enabled or jsb_state_feeder is not None):
                     gps_input_injector.print_observer()
                 if airspeed_injector is not None:
                     airspeed_injector.print_observer()
                 if attitude_injector is not None:
                     attitude_injector.print_observer()
+                if jsb_state_feeder is not None:
+                    jsb_state_feeder.print_observer()
                 if jsbsim_monitor is not None:
                     print_jsbsim_status(row)
-                if args.gps_input_inject or args.hil_inject:
+                if args.gps_input_inject or args.hil_inject or jsb_state_feeder is not None:
                     print_pixhawk_nav_compare(row, latest)
                 next_print = now + 1.0
 
