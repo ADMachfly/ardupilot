@@ -31,8 +31,10 @@
 #include <AP_HAL/utility/replace.h>
 #include <SRV_Channel/SRV_Channel.h>
 #include <AP_Filesystem/AP_Filesystem.h>
+#include <AP_Baro/AP_Baro.h>
 
 #define UDP_TIMEOUT_MS 100
+#define JSON_AIRSPEED_MAX_PRESSURE_PA 50000.0f
 
 extern const AP_HAL::HAL& hal;
 
@@ -57,7 +59,34 @@ static const struct {
     { "INS_ACCSCAL_X",     1.001 },
     { "INS_ACCSCAL_Y",     1.001 },
     { "INS_ACCSCAL_Z",     1.001 },
+    { "ARSPD_TYPE",      100 },
 };
+
+static bool json_airspeed_to_pressure(float tas_mps, float altitude_m, float ratio, float &eas_mps, float &pressure_pa)
+{
+    if (!isfinite(tas_mps) || is_negative(tas_mps)) {
+        return false;
+    }
+
+    if (!is_positive(ratio)) {
+        ratio = 2.0f;
+    }
+
+    const float density = AP_Baro::get_air_density_for_alt_amsl(altitude_m);
+    if (!isfinite(density) || !is_positive(density)) {
+        return false;
+    }
+
+    const float eas2tas = sqrtf(SSL_AIR_DENSITY / density);
+    if (!isfinite(eas2tas) || !is_positive(eas2tas)) {
+        return false;
+    }
+
+    eas_mps = tas_mps / eas2tas;
+    pressure_pa = sq(eas_mps) / ratio;
+    pressure_pa = constrain_float(pressure_pa, 0.0f, JSON_AIRSPEED_MAX_PRESSURE_PA);
+    return isfinite(eas_mps) && isfinite(pressure_pa);
+}
 
 
 JSON::JSON(const char *frame_str) :
@@ -435,10 +464,18 @@ void JSON::recv_fdm(const struct sitl_input &input)
     }
 
     if ((received_bitmask & AIRSPEED)) {
-        // received airspeed directly
-        airspeed = state.airspeed;
+        float eas_mps;
+        float pressure_pa;
+        if (!json_airspeed_to_pressure(state.airspeed, location.alt * 0.01f, sitl->airspeed[0].ratio, eas_mps, pressure_pa)) {
+            printf("Invalid JSON airspeed: %f\n", double(state.airspeed));
+            return;
+        }
 
-        airspeed_pitot = state.airspeed;
+        // JSON airspeed is true airspeed.  Convert through local density so the
+        // SITL airspeed backend receives the equivalent differential pressure.
+        airspeed = eas_mps;
+        airspeed_pitot = airspeed;
+        sitl->state.airspeed_raw_pressure[0] = pressure_pa;
     } else {
         
         // wind is not supported yet for JSON sim, assume zero for now        

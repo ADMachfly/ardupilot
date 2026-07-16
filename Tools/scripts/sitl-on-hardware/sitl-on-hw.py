@@ -116,6 +116,7 @@ if args.simclass:
         hwdef_write("define AP_SIM_GLIDER_ENABLED 1\n")
     elif args.simclass == 'JSON':
         hwdef_write("define AP_SIM_JSON_ENABLED 1\n")
+        defaults_write("ARSPD_TYPE 100\n")
     hwdef_write("define AP_SIM_FRAME_CLASS %s\n" % args.simclass)
 if args.frame:
     hwdef_write('define AP_SIM_FRAME_STRING "%s"\n' % args.frame)
