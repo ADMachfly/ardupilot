@@ -1,0 +1,6 @@
+# SR-75 rollback: restore TELEM1 to normal MAVLink2 and disable networking.
+SERIAL1_PROTOCOL 2
+SERIAL1_BAUD 57
+SERIAL1_OPTIONS 0
+BRD_SER1_RTSCTS 2
+NET_ENABLE 0
