@@ -16,7 +16,7 @@
     </event>
   </run>
 
-  <output name="../../../../../tmp/sr75_jsb_live_state.csv" type="CSV" rate="30">
+  <output name="../../../../../tmp/sr75_jsb_live_state.csv" type="CSV" rate="50">
     <property>simulation/sim-time-sec</property>
     <property>position/lat-gc-deg</property>
     <property>position/long-gc-deg</property>
@@ -29,6 +29,209 @@
     <property>attitude/phi-deg</property>
     <property>attitude/theta-rad</property>
     <property>attitude/psi-deg</property>
+    <function name="p_rad_s">
+      <property>velocities/p-rad_sec</property>
+    </function>
+    <function name="q_rad_s">
+      <property>velocities/q-rad_sec</property>
+    </function>
+    <function name="r_rad_s">
+      <property>velocities/r-rad_sec</property>
+    </function>
+    <function name="accel_body_x_mss">
+      <product>
+        <property>accelerations/a-pilot-x-ft_sec2</property>
+        <value>0.3048</value>
+      </product>
+    </function>
+    <function name="accel_body_y_mss">
+      <product>
+        <property>accelerations/a-pilot-y-ft_sec2</property>
+        <value>0.3048</value>
+      </product>
+    </function>
+    <function name="accel_body_z_mss">
+      <product>
+        <property>accelerations/a-pilot-z-ft_sec2</property>
+        <value>0.3048</value>
+      </product>
+    </function>
+    <function name="q1">
+      <sum>
+        <product>
+          <cos>
+            <product>
+              <property>attitude/phi-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+          <cos>
+            <product>
+              <property>attitude/theta-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+          <cos>
+            <product>
+              <property>attitude/psi-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+        </product>
+        <product>
+          <sin>
+            <product>
+              <property>attitude/phi-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+          <sin>
+            <product>
+              <property>attitude/theta-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+          <sin>
+            <product>
+              <property>attitude/psi-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+        </product>
+      </sum>
+    </function>
+    <function name="q2">
+      <difference>
+        <product>
+          <sin>
+            <product>
+              <property>attitude/phi-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+          <cos>
+            <product>
+              <property>attitude/theta-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+          <cos>
+            <product>
+              <property>attitude/psi-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+        </product>
+        <product>
+          <cos>
+            <product>
+              <property>attitude/phi-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+          <sin>
+            <product>
+              <property>attitude/theta-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+          <sin>
+            <product>
+              <property>attitude/psi-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+        </product>
+      </difference>
+    </function>
+    <function name="q3">
+      <sum>
+        <product>
+          <cos>
+            <product>
+              <property>attitude/phi-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+          <sin>
+            <product>
+              <property>attitude/theta-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+          <cos>
+            <product>
+              <property>attitude/psi-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+        </product>
+        <product>
+          <sin>
+            <product>
+              <property>attitude/phi-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+          <cos>
+            <product>
+              <property>attitude/theta-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+          <sin>
+            <product>
+              <property>attitude/psi-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+        </product>
+      </sum>
+    </function>
+    <function name="q4">
+      <difference>
+        <product>
+          <cos>
+            <product>
+              <property>attitude/phi-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+          <cos>
+            <product>
+              <property>attitude/theta-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+          <sin>
+            <product>
+              <property>attitude/psi-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+        </product>
+        <product>
+          <sin>
+            <product>
+              <property>attitude/phi-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+          <sin>
+            <product>
+              <property>attitude/theta-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+          <cos>
+            <product>
+              <property>attitude/psi-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+        </product>
+      </difference>
+    </function>
   </output>
 
 </runscript>

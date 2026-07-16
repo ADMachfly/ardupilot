@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<runscript xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="http://jsbsim.sf.net/JSBSimScript.xsd"
+    name="SR75 accelerometer free-fall validation">
+
+  <description>
+    Free-fall accelerometer semantics validation using an isolated script-only
+    suppression of aerodynamic area so the early ballistic interval is clean.
+  </description>
+
+  <use aircraft="sr_75_6_dof" initialize="accel_freefall_init"/>
+
+  <run start="0.0" end="5.0" dt="0.008333">
+    <event name="Clean ballistic drop">
+      <condition>simulation/sim-time-sec ge 0.0</condition>
+      <set name="position/terrain-elevation-asl-ft" value="788.0"/>
+      <set name="metrics/Sw-sqft" value="0.0"/>
+      <set name="aero/qbar-area" value="0.0"/>
+      <set name="propulsion/engine[0]/set-running" value="0"/>
+      <set name="propulsion/engine[1]/set-running" value="0"/>
+      <set name="propulsion/engine[2]/set-running" value="0"/>
+      <set name="fcs/turbojet-throttle-cmd-norm" value="0.0"/>
+      <set name="fcs/rato-throttle-cmd-norm" value="0.0"/>
+      <set name="fcs/throttle-cmd-norm" value="0.0"/>
+      <set name="fcs/aileron-cmd-norm" value="0.0"/>
+      <set name="fcs/elevator-cmd-norm" value="0.0"/>
+      <set name="fcs/rudder-cmd-norm" value="0.0"/>
+      <notify/>
+    </event>
+  </run>
+
+  <output name="../../../../../tmp/sr75_accel_freefall.csv" type="CSV" rate="50">
+    <property>simulation/sim-time-sec</property>
+    <property>position/h-agl-ft</property>
+    <property>attitude/phi-deg</property>
+    <property>attitude/theta-deg</property>
+    <property>attitude/psi-deg</property>
+    <property>velocities/u-fps</property>
+    <property>velocities/v-fps</property>
+    <property>velocities/w-fps</property>
+    <property>velocities/v-down-fps</property>
+    <property>velocities/p-rad_sec</property>
+    <property>velocities/q-rad_sec</property>
+    <property>velocities/r-rad_sec</property>
+    <property>accelerations/a-pilot-x-ft_sec2</property>
+    <property>accelerations/a-pilot-y-ft_sec2</property>
+    <property>accelerations/a-pilot-z-ft_sec2</property>
+    <property>accelerations/udot-ft_sec2</property>
+    <property>accelerations/vdot-ft_sec2</property>
+    <property>accelerations/wdot-ft_sec2</property>
+    <property>forces/fbx-total-lbs</property>
+    <property>forces/fby-total-lbs</property>
+    <property>forces/fbz-total-lbs</property>
+    <property>inertia/mass-slugs</property>
+    <property>gear/wow</property>
+    <property>gear/unit/WOW</property>
+    <property>gear/unit[1]/WOW</property>
+    <property>gear/unit[2]/WOW</property>
+    <function name="accel_body_x_mss">
+      <product>
+        <property>accelerations/a-pilot-x-ft_sec2</property>
+        <value>0.3048</value>
+      </product>
+    </function>
+    <function name="accel_body_y_mss">
+      <product>
+        <property>accelerations/a-pilot-y-ft_sec2</property>
+        <value>0.3048</value>
+      </product>
+    </function>
+    <function name="accel_body_z_mss">
+      <product>
+        <property>accelerations/a-pilot-z-ft_sec2</property>
+        <value>0.3048</value>
+      </product>
+    </function>
+  </output>
+
+</runscript>
