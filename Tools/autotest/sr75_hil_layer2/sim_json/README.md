@@ -20,10 +20,15 @@ Default channel map:
 ```text
 CH1 left elevon  -> fcs/elevator-cmd-norm and fcs/aileron-cmd-norm mix
 CH2 right elevon -> fcs/elevator-cmd-norm and fcs/aileron-cmd-norm mix
-CH3 left/right turbojet throttle -> fcs/turbojet-throttle-cmd-norm
+CH3 left/right turbojet throttle -> fcs/throttle-cmd-norm
 CH4 rudder -> fcs/rudder-cmd-norm
 CH7 simulated RATO command -> fcs/rato-throttle-cmd-norm
 ```
+
+`fcs/throttle-cmd-norm` is the active shared FADEC input in the SR-75 JSBSim
+FCS. `fcs/turbojet-throttle-cmd-norm` is declared by the aircraft model and
+used by some older scripts, but it is not the actuator input consumed by the
+current twin-turbojet throttle channel.
 
 CH7 matches the current SR-75 parameter assignments: `RATO_IGN_CH 7` in
 `Tools/autotest/models/sr75.parm` and `Tools/autotest/sr75_hil_layer2/SR75_LAYER2_HIL.param`.
@@ -54,6 +59,53 @@ stale timeout    = neutral surfaces, zero throttle, RATO off
 Verbose output uses the `ACTUATOR_LOG_ONLY` prefix. The CSV log appends decoded
 actuator fields and the intended JSBSim property names/values while preserving
 the existing state log columns.
+
+## Software-Only JSBSim Command Injection
+
+Layer 2J-B2 keeps the default mode log-only. A running local JSBSim SR-75 model
+is commanded only when the responder is started with `--jsbsim-command-target`.
+The command transport is UDP only; it does not open serial devices, GPIO,
+relays, servo outputs, engine hardware, RATO hardware, or MAVLink connections.
+
+Example command-enabled responder:
+
+```sh
+python3 Tools/autotest/sr75_hil_layer2/sim_json/sr75_sim_json_responder.py \
+  --state-file /tmp/sr75_jsb_layer2j_b2_state.csv \
+  --strict \
+  --jsbsim-command-target udp:127.0.0.1:5600 \
+  --verbose
+```
+
+The matching JSBSim input test script is:
+
+```sh
+JSBSim --root=Tools/autotest \
+  --script=aircraft/sr_75_6_dof/scripts/SR75_layer2j_b2_state_feed_test.xml \
+  --realtime
+```
+
+The command packet is ASCII CSV:
+
+```text
+timestamp_s,elevator,aileron,rudder,turbojet_throttle,rato_throttle
+```
+
+The JSBSim input properties are, in packet order:
+
+```text
+fcs/elevator-cmd-norm
+fcs/aileron-cmd-norm
+fcs/rudder-cmd-norm
+fcs/throttle-cmd-norm
+fcs/rato-throttle-cmd-norm
+```
+
+If SIM_JSON servo packets stop for longer than the actuator timeout, the
+responder sends one stale failsafe command with neutral surfaces, zero
+turbojet throttle, and RATO throttle off. The stale flag is retained in
+responder logs; it is not sent to JSBSim because the aircraft model has no
+stale-command property.
 
 ## Protocol
 

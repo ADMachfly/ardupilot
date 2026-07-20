@@ -1,0 +1,263 @@
+<?xml version="1.0" encoding="utf-8"?>
+<runscript xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="http://jsbsim.sf.net/JSBSimScript.xsd"
+    name="SR75 Layer 2J-B2 JSBSim command input test">
+
+  <use aircraft="sr_75_6_dof" initialize="layer2g_state_feed_init"/>
+
+  <input type="QTJSBSIM" port="5600" rate="50">
+    <property>fcs/elevator-cmd-norm</property>
+    <property>fcs/aileron-cmd-norm</property>
+    <property>fcs/rudder-cmd-norm</property>
+    <property>fcs/throttle-cmd-norm</property>
+    <property>fcs/rato-throttle-cmd-norm</property>
+  </input>
+
+  <run start="0.0" end="3600.0" dt="0.008333">
+    <event name="Set turbojets running">
+      <condition>simulation/sim-time-sec ge 0.0</condition>
+      <set name="propulsion/engine[0]/set-running" value="1"/>
+      <set name="propulsion/engine[1]/set-running" value="1"/>
+      <set name="propulsion/engine[2]/set-running" value="1"/>
+      <set name="fcs/throttle-cmd-norm" value="0.0"/>
+      <set name="fcs/rato-throttle-cmd-norm" value="0.0"/>
+      <notify/>
+    </event>
+  </run>
+
+  <output name="../../../../../tmp/sr75_jsb_layer2j_b2_state.csv" type="CSV" rate="50">
+    <property>simulation/sim-time-sec</property>
+    <property>position/lat-gc-deg</property>
+    <property>position/long-gc-deg</property>
+    <property>position/h-sl-ft</property>
+    <property>velocities/v-north-fps</property>
+    <property>velocities/v-east-fps</property>
+    <property>velocities/v-down-fps</property>
+    <property>velocities/vc-kts</property>
+    <property>velocities/vt-fps</property>
+    <property>attitude/phi-deg</property>
+    <property>attitude/theta-rad</property>
+    <property>attitude/psi-deg</property>
+    <property>aero/beta-rad</property>
+    <function name="p_rad_s">
+      <property>velocities/p-rad_sec</property>
+    </function>
+    <function name="q_rad_s">
+      <property>velocities/q-rad_sec</property>
+    </function>
+    <function name="r_rad_s">
+      <property>velocities/r-rad_sec</property>
+    </function>
+    <function name="accel_body_x_mss">
+      <product>
+        <property>accelerations/a-pilot-x-ft_sec2</property>
+        <value>0.3048</value>
+      </product>
+    </function>
+    <function name="accel_body_y_mss">
+      <product>
+        <property>accelerations/a-pilot-y-ft_sec2</property>
+        <value>0.3048</value>
+      </product>
+    </function>
+    <function name="accel_body_z_mss">
+      <product>
+        <property>accelerations/a-pilot-z-ft_sec2</property>
+        <value>0.3048</value>
+      </product>
+    </function>
+    <function name="q1">
+      <sum>
+        <product>
+          <cos>
+            <product>
+              <property>attitude/phi-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+          <cos>
+            <product>
+              <property>attitude/theta-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+          <cos>
+            <product>
+              <property>attitude/psi-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+        </product>
+        <product>
+          <sin>
+            <product>
+              <property>attitude/phi-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+          <sin>
+            <product>
+              <property>attitude/theta-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+          <sin>
+            <product>
+              <property>attitude/psi-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+        </product>
+      </sum>
+    </function>
+    <function name="q2">
+      <difference>
+        <product>
+          <sin>
+            <product>
+              <property>attitude/phi-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+          <cos>
+            <product>
+              <property>attitude/theta-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+          <cos>
+            <product>
+              <property>attitude/psi-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+        </product>
+        <product>
+          <cos>
+            <product>
+              <property>attitude/phi-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+          <sin>
+            <product>
+              <property>attitude/theta-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+          <sin>
+            <product>
+              <property>attitude/psi-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+        </product>
+      </difference>
+    </function>
+    <function name="q3">
+      <sum>
+        <product>
+          <cos>
+            <product>
+              <property>attitude/phi-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+          <sin>
+            <product>
+              <property>attitude/theta-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+          <cos>
+            <product>
+              <property>attitude/psi-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+        </product>
+        <product>
+          <sin>
+            <product>
+              <property>attitude/phi-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+          <cos>
+            <product>
+              <property>attitude/theta-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+          <sin>
+            <product>
+              <property>attitude/psi-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+        </product>
+      </sum>
+    </function>
+    <function name="q4">
+      <difference>
+        <product>
+          <cos>
+            <product>
+              <property>attitude/phi-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+          <cos>
+            <product>
+              <property>attitude/theta-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+          <sin>
+            <product>
+              <property>attitude/psi-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+        </product>
+        <product>
+          <sin>
+            <product>
+              <property>attitude/phi-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+          <sin>
+            <product>
+              <property>attitude/theta-rad</property>
+              <value>0.5</value>
+            </product>
+          </sin>
+          <cos>
+            <product>
+              <property>attitude/psi-rad</property>
+              <value>0.5</value>
+            </product>
+          </cos>
+        </product>
+      </difference>
+    </function>
+    <property>fcs/elevator-cmd-norm</property>
+    <property>fcs/aileron-cmd-norm</property>
+    <property>fcs/rudder-cmd-norm</property>
+    <property>fcs/throttle-cmd-norm</property>
+    <property>fcs/rato-throttle-cmd-norm</property>
+    <property>fcs/left-elevon-pos-rad</property>
+    <property>fcs/right-elevon-pos-rad</property>
+    <property>fcs/rudder3-pos-rad</property>
+    <property>fcs/rudder4-pos-rad</property>
+    <property>fcs/throttle-cmd-norm[0]</property>
+    <property>fcs/throttle-cmd-norm[1]</property>
+    <property>fcs/throttle-cmd-norm[2]</property>
+    <property>propulsion/engine[2]/set-running</property>
+    <property>propulsion/engine[0]/thrust-lbs</property>
+    <property>propulsion/engine[1]/thrust-lbs</property>
+    <property>propulsion/engine[2]/thrust-lbs</property>
+  </output>
+
+</runscript>

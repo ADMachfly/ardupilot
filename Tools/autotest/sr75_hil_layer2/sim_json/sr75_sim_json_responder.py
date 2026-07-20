@@ -2,8 +2,9 @@
 """
 SR-75 host-side responder for ArduPilot's SIM_JSON UDP protocol.
 
-This tool only replies to SIM_JSON UDP control packets.  It never opens a
-serial port, never emits MAVLink, and never forwards PWM/control values.
+This tool replies to SIM_JSON UDP control packets. It never opens a serial
+port or emits MAVLink. JSBSim command output is disabled unless explicitly
+enabled with --jsbsim-command-target.
 """
 
 import argparse
@@ -26,6 +27,16 @@ from sr75_sim_json_actuator_bridge import (
     describe_channel_map,
 )
 
+JSBSIM_CONTROL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "jsbsim_control"))
+if JSBSIM_CONTROL_DIR not in sys.path:
+    sys.path.insert(0, JSBSIM_CONTROL_DIR)
+
+from sr75_jsbsim_command_sink import (  # noqa: E402
+    JSBSimActuatorCommand,
+    JSBSimCommandError,
+    UDPJSBSimCommandSink,
+)
+
 
 DEFAULT_STATE_FILE = "/tmp/sr75_jsb_live_state.csv"
 GRAVITY_MSS = 9.80665
@@ -41,6 +52,8 @@ SERVO32_STRUCT = struct.Struct("<HHI32H")
 LOG_FIELDS = [
     "host_monotonic_time",
     "request_count",
+    "frame_rate",
+    "frame_count",
     "source_ip",
     "source_port",
     "packet_valid",
@@ -540,11 +553,14 @@ def make_log_row(
     reply_bytes: int = 0,
     error_reason: str = "",
     actuator_command: Optional[NormalizedActuatorCommand] = None,
+    control_packet: Optional[ControlPacket] = None,
 ) -> Dict[str, object]:
     now = time.monotonic()
     row: Dict[str, object] = {
         "host_monotonic_time": f"{now:.9f}",
         "request_count": request_count,
+        "frame_rate": "" if control_packet is None else control_packet.frame_rate,
+        "frame_count": "" if control_packet is None else control_packet.frame_count,
         "source_ip": source[0],
         "source_port": source[1],
         "packet_valid": int(packet_valid),
@@ -591,6 +607,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override throttle/RATO command deadband",
     )
+    parser.add_argument(
+        "--jsbsim-command-target",
+        default=None,
+        help="Opt-in UDP JSBSim command target, for example udp:127.0.0.1:5600",
+    )
     return parser
 
 
@@ -611,6 +632,22 @@ def build_actuator_channel_map(args: argparse.Namespace) -> ActuatorChannelMap:
     )
 
 
+def jsbsim_command_from_actuator(
+    actuator_command: NormalizedActuatorCommand,
+    timestamp_s: Optional[float] = None,
+) -> JSBSimActuatorCommand:
+    timestamp = time.monotonic() if timestamp_s is None else timestamp_s
+    return JSBSimActuatorCommand(
+        timestamp_s=timestamp,
+        elevator=actuator_command.elevator,
+        aileron=actuator_command.aileron,
+        rudder=actuator_command.rudder,
+        turbojet_throttle=actuator_command.turbojet_throttle,
+        rato_throttle=actuator_command.rato,
+        stale=actuator_command.stale,
+    )
+
+
 def main() -> int:
     args = build_arg_parser().parse_args()
     try:
@@ -618,12 +655,23 @@ def main() -> int:
     except ActuatorMapError as exc:
         print(f"ERROR: actuator channel map invalid: {exc}", file=sys.stderr)
         return 2
+    command_sink = None
+    if args.jsbsim_command_target:
+        try:
+            command_sink = UDPJSBSimCommandSink(args.jsbsim_command_target)
+        except JSBSimCommandError as exc:
+            print(f"ERROR: JSBSim command target invalid: {exc}", file=sys.stderr)
+            return 2
 
     print("SR75 SIM_JSON RESPONDER")
-    print("ACTUATOR OUTPUT: DISABLED")
+    if command_sink is None:
+        print("ACTUATOR OUTPUT: DISABLED")
+    else:
+        print(f"ACTUATOR OUTPUT: SOFTWARE_JSBSIM_ONLY target={args.jsbsim_command_target}")
     print("SERIAL OUTPUT: DISABLED")
     print("RATO/ENGINE/RELAY OUTPUT: DISABLED")
-    print(f"ACTUATOR DECODE: LOG_ONLY {describe_channel_map(actuator_channel_map)}")
+    mode = "LOG_ONLY" if command_sink is None else "JSBSIM_COMMAND"
+    print(f"ACTUATOR DECODE: {mode} {describe_channel_map(actuator_channel_map)}")
 
     csv_file, log_writer = open_log(args.log_csv)
     reader = LatestCSVReader(args.state_file)
@@ -639,14 +687,28 @@ def main() -> int:
         sock.bind((args.listen_host, args.listen_port))
     except OSError as exc:
         print(f"ERROR: bind failed on {args.listen_host}:{args.listen_port}: {exc}", file=sys.stderr)
+        if command_sink is not None:
+            command_sink.close()
         return 2
+    if command_sink is not None:
+        timeout_s = min(0.05, max(0.001, actuator_channel_map.timeout_ms / 2000.0))
+        sock.settimeout(timeout_s)
     print(f"Listening on {args.listen_host}:{args.listen_port}")
     print(f"State source: {'mock-state' if args.mock_state else args.state_file}")
 
     try:
         while True:
-            data, source = sock.recvfrom(4096)
             started = time.monotonic()
+            try:
+                data, source = sock.recvfrom(4096)
+            except socket.timeout:
+                if command_sink is not None:
+                    actuator_command = actuator_bridge.current_command(started)
+                    if actuator_command.stale:
+                        sent = command_sink.send_stale_once(timestamp_s=started)
+                        if args.verbose and sent is not None:
+                            print("JSBSIM_COMMAND stale=1 elev=0.000 ail=0.000 rud=0.000 thr=0.000 rato=0.000")
+                continue
             request_count += 1
             try:
                 packet = decode_control_packet(data)
@@ -665,6 +727,21 @@ def main() -> int:
                 actuator_reason = f"ACTUATOR_MAP_ERROR: {exc}"
                 print(actuator_reason)
                 actuator_command = actuator_bridge.current_command(started)
+
+            if command_sink is not None:
+                try:
+                    command_sink.send(jsbsim_command_from_actuator(actuator_command, timestamp_s=started))
+                    if args.verbose:
+                        print(
+                            "JSBSIM_COMMAND "
+                            f"stale={int(actuator_command.stale)} "
+                            f"elev={actuator_command.elevator:.3f} ail={actuator_command.aileron:.3f} "
+                            f"rud={actuator_command.rudder:.3f} "
+                            f"thr={actuator_command.turbojet_throttle:.3f} rato={actuator_command.rato:.3f}"
+                        )
+                except JSBSimCommandError as exc:
+                    actuator_reason = f"JSBSIM_COMMAND_ERROR: {exc}"
+                    print(actuator_reason)
 
             if args.verbose:
                 print(
@@ -688,7 +765,15 @@ def main() -> int:
                 write_log(
                     log_writer,
                     csv_file,
-                    make_log_row(request_count, source, True, started, error_reason=reason, actuator_command=actuator_command),
+                    make_log_row(
+                        request_count,
+                        source,
+                        True,
+                        started,
+                        error_reason=reason,
+                        actuator_command=actuator_command,
+                        control_packet=packet,
+                    ),
                 )
                 if args.verbose:
                     print(reason)
@@ -715,7 +800,15 @@ def main() -> int:
                 write_log(
                     log_writer,
                     csv_file,
-                    make_log_row(request_count, source, True, started, error_reason=reason, actuator_command=actuator_command),
+                    make_log_row(
+                        request_count,
+                        source,
+                        True,
+                        started,
+                        error_reason=reason,
+                        actuator_command=actuator_command,
+                        control_packet=packet,
+                    ),
                 )
                 if args.once:
                     return 1
@@ -744,7 +837,17 @@ def main() -> int:
             write_log(
                 log_writer,
                 csv_file,
-                make_log_row(request_count, source, True, started, state, reply_bytes, reason, actuator_command),
+                make_log_row(
+                    request_count,
+                    source,
+                    True,
+                    started,
+                    state,
+                    reply_bytes,
+                    reason,
+                    actuator_command,
+                    packet,
+                ),
             )
             if args.once:
                 return 0
@@ -753,6 +856,8 @@ def main() -> int:
         return 0
     finally:
         sock.close()
+        if command_sink is not None:
+            command_sink.close()
         if csv_file is not None:
             csv_file.close()
 

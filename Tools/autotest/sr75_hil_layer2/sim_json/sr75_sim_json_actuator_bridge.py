@@ -37,7 +37,7 @@ JSBSIM_PROPERTIES = {
     "elevator": "fcs/elevator-cmd-norm",
     "aileron": "fcs/aileron-cmd-norm",
     "rudder": "fcs/rudder-cmd-norm",
-    "turbojet_throttle": "fcs/turbojet-throttle-cmd-norm",
+    "turbojet_throttle": "fcs/throttle-cmd-norm",
     "rato_throttle": "fcs/rato-throttle-cmd-norm",
 }
 
