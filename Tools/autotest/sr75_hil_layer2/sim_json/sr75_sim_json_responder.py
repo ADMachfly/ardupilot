@@ -18,6 +18,14 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from sr75_sim_json_actuator_bridge import (
+    ActuatorChannelMap,
+    ActuatorMapError,
+    NormalizedActuatorCommand,
+    SoftwareActuatorBridge,
+    describe_channel_map,
+)
+
 
 DEFAULT_STATE_FILE = "/tmp/sr75_jsb_live_state.csv"
 GRAVITY_MSS = 9.80665
@@ -51,6 +59,27 @@ LOG_FIELDS = [
     "reply_bytes",
     "round_trip_or_processing_us",
     "error_reason",
+    "act_left_elevon_norm",
+    "act_right_elevon_norm",
+    "act_elevator_norm",
+    "act_aileron_norm",
+    "act_rudder_norm",
+    "act_throttle_left_norm",
+    "act_throttle_right_norm",
+    "act_turbojet_throttle_norm",
+    "act_rato_norm",
+    "act_stale",
+    "act_warnings",
+    "jsbsim_elevator_property",
+    "jsbsim_elevator_value",
+    "jsbsim_aileron_property",
+    "jsbsim_aileron_value",
+    "jsbsim_rudder_property",
+    "jsbsim_rudder_value",
+    "jsbsim_throttle_property",
+    "jsbsim_throttle_value",
+    "jsbsim_rato_property",
+    "jsbsim_rato_value",
 ]
 
 
@@ -400,7 +429,10 @@ class StateMapper:
         q2, _ = parse_float(row, ("q2", "quat_x", "quaternion_x"), required=False)
         q3, _ = parse_float(row, ("q3", "quat_y", "quaternion_y"), required=False)
         q4, _ = parse_float(row, ("q4", "quat_z", "quaternion_z"), required=False)
-        quat = normalize_quaternion((q1, q2, q3, q4)) if None not in (q1, q2, q3, q4) else euler_to_quaternion(roll, pitch, yaw)
+        if None not in (q1, q2, q3, q4):
+            quat = normalize_quaternion((q1, q2, q3, q4))
+        else:
+            quat = euler_to_quaternion(roll, pitch, yaw)
 
         if self.last_source_timestamp is not None and timestamp < self.last_source_timestamp:
             raise StateError(f"backward source timestamp: {timestamp} < {self.last_source_timestamp}")
@@ -507,9 +539,10 @@ def make_log_row(
     state: Optional[SimState] = None,
     reply_bytes: int = 0,
     error_reason: str = "",
+    actuator_command: Optional[NormalizedActuatorCommand] = None,
 ) -> Dict[str, object]:
     now = time.monotonic()
-    return {
+    row: Dict[str, object] = {
         "host_monotonic_time": f"{now:.9f}",
         "request_count": request_count,
         "source_ip": source[0],
@@ -531,6 +564,9 @@ def make_log_row(
         "round_trip_or_processing_us": int((now - started) * 1000000.0),
         "error_reason": error_reason,
     }
+    if actuator_command is not None:
+        row.update(actuator_command.log_fields())
+    return row
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -546,21 +582,54 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--mock-state", action="store_true")
     parser.add_argument("--strict", action="store_true")
+    parser.add_argument("--actuator-map", default=None, help="JSON channel map for software-only actuator decoding")
+    parser.add_argument("--actuator-timeout-ms", type=float, default=None, help="Override actuator stale-command timeout")
+    parser.add_argument("--actuator-surface-deadband", type=float, default=None, help="Override surface command deadband")
+    parser.add_argument(
+        "--actuator-throttle-deadband",
+        type=float,
+        default=None,
+        help="Override throttle/RATO command deadband",
+    )
     return parser
+
+
+def build_actuator_channel_map(args: argparse.Namespace) -> ActuatorChannelMap:
+    channel_map = ActuatorChannelMap.from_json_file(args.actuator_map)
+    timeout_ms = channel_map.timeout_ms if args.actuator_timeout_ms is None else args.actuator_timeout_ms
+    surface_deadband = (
+        channel_map.surface_deadband if args.actuator_surface_deadband is None else args.actuator_surface_deadband
+    )
+    throttle_deadband = (
+        channel_map.throttle_deadband if args.actuator_throttle_deadband is None else args.actuator_throttle_deadband
+    )
+    return ActuatorChannelMap(
+        channels=dict(channel_map.channels),
+        timeout_ms=timeout_ms,
+        surface_deadband=surface_deadband,
+        throttle_deadband=throttle_deadband,
+    )
 
 
 def main() -> int:
     args = build_arg_parser().parse_args()
+    try:
+        actuator_channel_map = build_actuator_channel_map(args)
+    except ActuatorMapError as exc:
+        print(f"ERROR: actuator channel map invalid: {exc}", file=sys.stderr)
+        return 2
 
     print("SR75 SIM_JSON RESPONDER")
     print("ACTUATOR OUTPUT: DISABLED")
     print("SERIAL OUTPUT: DISABLED")
     print("RATO/ENGINE/RELAY OUTPUT: DISABLED")
+    print(f"ACTUATOR DECODE: LOG_ONLY {describe_channel_map(actuator_channel_map)}")
 
     csv_file, log_writer = open_log(args.log_csv)
     reader = LatestCSVReader(args.state_file)
     mapper = StateMapper(strict=args.strict)
     mock_source = MockStateSource()
+    actuator_bridge = SoftwareActuatorBridge(actuator_channel_map)
     min_interval = 1.0 / args.rate_limit_hz if args.rate_limit_hz and args.rate_limit_hz > 0.0 else 0.0
     last_reply_mono = 0.0
     request_count = 0
@@ -589,17 +658,38 @@ def main() -> int:
                     return 1
                 continue
 
+            actuator_reason = ""
+            try:
+                actuator_command = actuator_bridge.update_from_pwm(packet.pwm, started)
+            except ActuatorMapError as exc:
+                actuator_reason = f"ACTUATOR_MAP_ERROR: {exc}"
+                print(actuator_reason)
+                actuator_command = actuator_bridge.current_command(started)
+
             if args.verbose:
                 print(
                     f"REQ {request_count} from {source[0]}:{source[1]} "
                     f"magic={packet.magic} frame_rate={packet.frame_rate} frame={packet.frame_count} "
                     f"pwm0={packet.pwm[0] if packet.pwm else ''}"
                 )
+                warnings = f" warnings={';'.join(actuator_command.warnings)}" if actuator_command.warnings else ""
+                print(
+                    "ACTUATOR_LOG_ONLY "
+                    f"left={actuator_command.left_elevon:.3f} right={actuator_command.right_elevon:.3f} "
+                    f"elev={actuator_command.elevator:.3f} ail={actuator_command.aileron:.3f} "
+                    f"rud={actuator_command.rudder:.3f} "
+                    f"thr_l={actuator_command.throttle_left:.3f} thr_r={actuator_command.throttle_right:.3f} "
+                    f"rato={actuator_command.rato:.3f} stale={int(actuator_command.stale)}{warnings}"
+                )
 
             now = time.monotonic()
             if min_interval > 0.0 and now - last_reply_mono < min_interval:
                 reason = "RATE_LIMIT"
-                write_log(log_writer, csv_file, make_log_row(request_count, source, True, started, error_reason=reason))
+                write_log(
+                    log_writer,
+                    csv_file,
+                    make_log_row(request_count, source, True, started, error_reason=reason, actuator_command=actuator_command),
+                )
                 if args.verbose:
                     print(reason)
                 continue
@@ -620,7 +710,13 @@ def main() -> int:
                     print(reason)
                 else:
                     print(f"STATE_ERROR: {reason}")
-                write_log(log_writer, csv_file, make_log_row(request_count, source, True, started, error_reason=reason))
+                if actuator_reason:
+                    reason = f"{reason};{actuator_reason}"
+                write_log(
+                    log_writer,
+                    csv_file,
+                    make_log_row(request_count, source, True, started, error_reason=reason, actuator_command=actuator_command),
+                )
                 if args.once:
                     return 1
                 continue
@@ -633,7 +729,7 @@ def main() -> int:
             else:
                 reply_bytes = sock.sendto(payload, source)
                 last_reply_mono = time.monotonic()
-                reason = ""
+                reason = actuator_reason
                 if not args.mock_state:
                     mapper.accept_state(state)
                 if args.verbose:
@@ -645,7 +741,11 @@ def main() -> int:
                         f"rpy=({state.roll_rad:.5f},{state.pitch_rad:.5f},{state.yaw_rad:.5f}){missing}{reused}"
                     )
 
-            write_log(log_writer, csv_file, make_log_row(request_count, source, True, started, state, reply_bytes, reason))
+            write_log(
+                log_writer,
+                csv_file,
+                make_log_row(request_count, source, True, started, state, reply_bytes, reason, actuator_command),
+            )
             if args.once:
                 return 0
     except KeyboardInterrupt:

@@ -9,6 +9,52 @@ forwards PWM values, and never drives actuators, relays, RATO, engine, FADEC,
 fuel, or ejection logic. Incoming PWM/control packets are decoded only to
 validate the SIM_JSON protocol and for optional logging.
 
+## Software-Only Actuator Decode
+
+Layer 2J-B adds a log-only decoder for incoming SIM_JSON PWM packets. It maps
+the ArduPilot output packet to normalized SR-75 JSBSim command values, but does
+not write those values to JSBSim or to any physical interface.
+
+Default channel map:
+
+```text
+CH1 left elevon  -> fcs/elevator-cmd-norm and fcs/aileron-cmd-norm mix
+CH2 right elevon -> fcs/elevator-cmd-norm and fcs/aileron-cmd-norm mix
+CH3 left/right turbojet throttle -> fcs/turbojet-throttle-cmd-norm
+CH4 rudder -> fcs/rudder-cmd-norm
+CH7 simulated RATO command -> fcs/rato-throttle-cmd-norm
+```
+
+CH7 matches the current SR-75 parameter assignments: `RATO_IGN_CH 7` in
+`Tools/autotest/models/sr75.parm` and `Tools/autotest/sr75_hil_layer2/SR75_LAYER2_HIL.param`.
+CH8 is reserved there for `RATO_EJ_CH` and is not consumed by this first
+log-only throttle/RATO command decoder.
+
+The default map is also provided as `SR75_SIM_JSON_CHANNEL_MAP.json` and can be
+overridden with:
+
+```sh
+python3 Tools/autotest/sr75_hil_layer2/sim_json/sr75_sim_json_responder.py \
+  --mock-state \
+  --actuator-map Tools/autotest/sr75_hil_layer2/sim_json/SR75_SIM_JSON_CHANNEL_MAP.json \
+  --log-csv /tmp/sr75_sim_json_responder.csv \
+  --verbose
+```
+
+Normalization:
+
+```text
+surface command  = clamp((pwm - 1500) / 500, -1, 1)
+throttle/RATO    = clamp((pwm - 1000) / 1000, 0, 1)
+elevator command = (left_elevon + right_elevon) / 2
+aileron command  = (left_elevon - right_elevon) / 2
+stale timeout    = neutral surfaces, zero throttle, RATO off
+```
+
+Verbose output uses the `ACTUATOR_LOG_ONLY` prefix. The CSV log appends decoded
+actuator fields and the intended JSBSim property names/values while preserving
+the existing state log columns.
+
 ## Protocol
 
 ArduPilot `libraries/SITL/SIM_JSON.cpp` sends one binary servo/control packet

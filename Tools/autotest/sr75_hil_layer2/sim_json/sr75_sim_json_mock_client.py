@@ -7,6 +7,9 @@ import socket
 import struct
 import sys
 import time
+from typing import List, Tuple
+
+from sr75_sim_json_actuator_bridge import neutral_pwm_values
 
 
 SERVO16_MAGIC = 18458
@@ -14,8 +17,21 @@ SERVO16_STRUCT = struct.Struct("<HHI16H")
 REQUIRED_TOP_LEVEL = ("timestamp", "imu", "velocity")
 
 
-def build_packet(frame_rate: int, frame_count: int) -> bytes:
-    pwm = [1500] * 16
+def parse_pwm_override(value: str) -> Tuple[int, int]:
+    parts = value.split(":", 1)
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("PWM override must use CH:PWM")
+    try:
+        channel = int(parts[0])
+        pwm = int(parts[1])
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("PWM override CH and PWM must be integers") from exc
+    if channel < 1 or channel > 16:
+        raise argparse.ArgumentTypeError("PWM override channel must be 1..16")
+    return channel, pwm
+
+
+def build_packet(frame_rate: int, frame_count: int, pwm: List[int]) -> bytes:
     return SERVO16_STRUCT.pack(SERVO16_MAGIC, frame_rate, frame_count, *pwm)
 
 
@@ -40,6 +56,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rate-hz", type=float, default=20.0)
     parser.add_argument("--count", type=int, default=1, help="0 means run forever")
     parser.add_argument("--timeout", type=float, default=1.0)
+    parser.add_argument("--pwm", action="append", type=parse_pwm_override, default=[], help="Override PWM as CH:PWM")
     parser.add_argument("--verbose", action="store_true")
     return parser
 
@@ -49,6 +66,9 @@ def main() -> int:
     period = 1.0 / args.rate_hz if args.rate_hz > 0 else 0.0
     frame_rate = int(round(args.rate_hz)) if args.rate_hz > 0 else 0
     count = 0
+    pwm = neutral_pwm_values()
+    for channel, value in args.pwm:
+        pwm[channel - 1] = value
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(args.timeout)
@@ -56,7 +76,7 @@ def main() -> int:
     try:
         while args.count == 0 or count < args.count:
             count += 1
-            packet = build_packet(frame_rate, count)
+            packet = build_packet(frame_rate, count, pwm)
             start = time.monotonic()
             sock.sendto(packet, (args.host, args.port))
             try:
