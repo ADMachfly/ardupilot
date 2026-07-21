@@ -7,7 +7,7 @@
   <channel name="Throttle">
     <!-- Shared SR-75 FADEC throttle controller -->
     <actuator name="fcs/sr75-fadec-throttle">
-      <input>fcs/throttle-cmd-norm</input>
+      <input>fcs/turbojet-throttle-cmd-norm</input>
       <lag>0.25</lag>
       <clipto>
         <min>0.0</min>

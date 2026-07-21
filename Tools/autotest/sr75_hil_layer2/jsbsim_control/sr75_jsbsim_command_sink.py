@@ -18,7 +18,7 @@ JSBSIM_INPUT_PROPERTIES = (
     "fcs/elevator-cmd-norm",
     "fcs/aileron-cmd-norm",
     "fcs/rudder-cmd-norm",
-    "fcs/throttle-cmd-norm",
+    "fcs/turbojet-throttle-cmd-norm",
     "fcs/rato-throttle-cmd-norm",
 )
 

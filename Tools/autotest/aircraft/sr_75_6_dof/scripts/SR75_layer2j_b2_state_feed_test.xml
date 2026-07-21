@@ -9,7 +9,7 @@
     <property>fcs/elevator-cmd-norm</property>
     <property>fcs/aileron-cmd-norm</property>
     <property>fcs/rudder-cmd-norm</property>
-    <property>fcs/throttle-cmd-norm</property>
+    <property>fcs/turbojet-throttle-cmd-norm</property>
     <property>fcs/rato-throttle-cmd-norm</property>
   </input>
 
@@ -19,7 +19,7 @@
       <set name="propulsion/engine[0]/set-running" value="1"/>
       <set name="propulsion/engine[1]/set-running" value="1"/>
       <set name="propulsion/engine[2]/set-running" value="1"/>
-      <set name="fcs/throttle-cmd-norm" value="0.0"/>
+      <set name="fcs/turbojet-throttle-cmd-norm" value="0.0"/>
       <set name="fcs/rato-throttle-cmd-norm" value="0.0"/>
       <notify/>
     </event>
@@ -245,7 +245,7 @@
     <property>fcs/elevator-cmd-norm</property>
     <property>fcs/aileron-cmd-norm</property>
     <property>fcs/rudder-cmd-norm</property>
-    <property>fcs/throttle-cmd-norm</property>
+    <property>fcs/turbojet-throttle-cmd-norm</property>
     <property>fcs/rato-throttle-cmd-norm</property>
     <property>fcs/left-elevon-pos-rad</property>
     <property>fcs/right-elevon-pos-rad</property>

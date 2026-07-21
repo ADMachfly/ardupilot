@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<initialize name="SR75 Layer 2J-B3 neutral trim reference start">
+  <latitude unit="DEG">32.5378085</latitude>
+  <longitude unit="DEG">74.3661944</longitude>
+  <altitude unit="M">3000.0</altitude>
+  <vt unit="KTS">134.1</vt>
+  <gamma unit="DEG">0.0</gamma>
+  <alpha unit="DEG">-2.0</alpha>
+  <psi unit="DEG">315.0</psi>
+  <phi unit="DEG">0.0</phi>
+  <theta unit="DEG">-2.0</theta>
+  <p unit="RAD/SEC">0.0</p>
+  <q unit="RAD/SEC">0.0</q>
+  <r unit="RAD/SEC">0.0</r>
+</initialize>

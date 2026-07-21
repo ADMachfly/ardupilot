@@ -20,15 +20,14 @@ Default channel map:
 ```text
 CH1 left elevon  -> fcs/elevator-cmd-norm and fcs/aileron-cmd-norm mix
 CH2 right elevon -> fcs/elevator-cmd-norm and fcs/aileron-cmd-norm mix
-CH3 left/right turbojet throttle -> fcs/throttle-cmd-norm
+CH3 left/right turbojet throttle -> fcs/turbojet-throttle-cmd-norm
 CH4 rudder -> fcs/rudder-cmd-norm
 CH7 simulated RATO command -> fcs/rato-throttle-cmd-norm
 ```
 
-`fcs/throttle-cmd-norm` is the active shared FADEC input in the SR-75 JSBSim
-FCS. `fcs/turbojet-throttle-cmd-norm` is declared by the aircraft model and
-used by some older scripts, but it is not the actuator input consumed by the
-current twin-turbojet throttle channel.
+`fcs/turbojet-throttle-cmd-norm` is the active shared FADEC input in the SR-75
+JSBSim FCS. The FCS writes indexed engine throttle outputs to
+`fcs/throttle-cmd-norm[0]` and `[1]`; `[2]` is reserved for simulated RATO.
 
 CH7 matches the current SR-75 parameter assignments: `RATO_IGN_CH 7` in
 `Tools/autotest/models/sr75.parm` and `Tools/autotest/sr75_hil_layer2/SR75_LAYER2_HIL.param`.
@@ -97,7 +96,7 @@ The JSBSim input properties are, in packet order:
 fcs/elevator-cmd-norm
 fcs/aileron-cmd-norm
 fcs/rudder-cmd-norm
-fcs/throttle-cmd-norm
+fcs/turbojet-throttle-cmd-norm
 fcs/rato-throttle-cmd-norm
 ```
 

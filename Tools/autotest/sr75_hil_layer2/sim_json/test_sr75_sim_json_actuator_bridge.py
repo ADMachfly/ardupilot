@@ -49,6 +49,43 @@ class TestSR75SIMJSONActuatorBridge(unittest.TestCase):
         channel_map = ActuatorChannelMap.from_json_file(map_path)
         self.assertEqual(channel_map.channels, DEFAULT_CHANNELS)
         self.assertEqual(channel_map.channels["rato"], 7)
+        self.assertEqual(channel_map.optional_roles, ())
+
+    def test_b3_channel_map_marks_rato_optional(self):
+        map_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "closed_loop",
+            "SR75_LAYER2J_B3_CHANNEL_MAP.json",
+        )
+        channel_map = ActuatorChannelMap.from_json_file(map_path)
+        self.assertEqual(channel_map.channels, DEFAULT_CHANNELS)
+        self.assertEqual(channel_map.optional_roles, ("rato",))
+
+    def test_optional_rato_zero_is_off_without_warning(self):
+        channel_map = ActuatorChannelMap(channels=DEFAULT_CHANNELS, optional_roles=("rato",))
+        bridge = SoftwareActuatorBridge(channel_map)
+        pwm = neutral_pwm()
+        pwm[6] = 0
+        command = bridge.update_from_pwm(pwm, now=1.0)
+        self.assertEqual(command.rato, 0.0)
+        self.assertNotIn("ch7:out_of_range:0", command.warnings)
+
+    def test_unmapped_zero_pwm_channels_do_not_warn(self):
+        channel_map = ActuatorChannelMap(channels=DEFAULT_CHANNELS, optional_roles=("rato",))
+        bridge = SoftwareActuatorBridge(channel_map)
+        pwm = neutral_pwm()
+        for index in (4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15):
+            pwm[index] = 0
+        command = bridge.update_from_pwm(pwm, now=1.0)
+        self.assertEqual(command.warnings, ())
+
+    def test_optional_rato_does_not_weaken_strict_map(self):
+        pwm = neutral_pwm()
+        pwm[6] = 0
+        strict_command = self.bridge.update_from_pwm(pwm, now=1.0)
+        self.assertEqual(strict_command.rato, 0.0)
+        self.assertIn("ch7:out_of_range:0", strict_command.warnings)
 
     def test_out_of_range_pwm_is_warned_and_clamped(self):
         pwm = neutral_pwm()

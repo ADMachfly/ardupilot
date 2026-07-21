@@ -40,6 +40,7 @@ from sr75_jsbsim_command_sink import (  # noqa: E402
 
 DEFAULT_STATE_FILE = "/tmp/sr75_jsb_live_state.csv"
 GRAVITY_MSS = 9.80665
+MIN_OUTGOING_TIMESTAMP_STEP_S = 1.0e-6
 FT_TO_M = 0.3048
 FPS_TO_MPS = 0.3048
 KTS_TO_MPS = 0.514444
@@ -59,6 +60,11 @@ LOG_FIELDS = [
     "packet_valid",
     "state_age_ms",
     "simulation_timestamp",
+    "source_simulation_timestamp",
+    "previous_sent_timestamp",
+    "state_reused",
+    "reply_sent",
+    "reply_reason",
     "latitude",
     "longitude",
     "altitude",
@@ -83,6 +89,14 @@ LOG_FIELDS = [
     "act_rato_norm",
     "act_stale",
     "act_warnings",
+    "pwm1",
+    "pwm2",
+    "pwm3",
+    "pwm4",
+    "pwm5",
+    "pwm6",
+    "pwm7",
+    "pwm8",
     "jsbsim_elevator_property",
     "jsbsim_elevator_value",
     "jsbsim_aileron_property",
@@ -98,6 +112,14 @@ LOG_FIELDS = [
 
 class StateError(Exception):
     """Raised when state cannot be converted to a valid SIM_JSON reply."""
+
+
+class StateEnvelopeError(Exception):
+    """Raised when B3 bounded-test state exceeds the allowed safety envelope."""
+
+    def __init__(self, offenders: Sequence[str]):
+        self.offenders = tuple(offenders)
+        super().__init__(";".join(self.offenders))
 
 
 def degrees_to_radians(value: float) -> float:
@@ -207,6 +229,7 @@ class SimState:
     row_monotonic_time: float
     reused_source_row: bool = False
     missing_fields: Tuple[str, ...] = ()
+    source_row: Optional[Dict[str, str]] = None
 
     def validate(self) -> None:
         require_range("latitude", self.latitude_deg, -90.0, 90.0)
@@ -232,7 +255,7 @@ class SimState:
             raise StateError("state contains non-finite values")
         normalize_quaternion(self.quaternion)
 
-    def to_json_bytes(self) -> bytes:
+    def to_json_bytes(self, rc_pwm: Optional[Sequence[int]] = None) -> bytes:
         payload = {
             "timestamp": self.timestamp_s,
             "latitude": self.latitude_deg,
@@ -247,6 +270,11 @@ class SimState:
             "quaternion": list(self.quaternion),
             "airspeed": self.airspeed_mps,
         }
+        if rc_pwm is not None:
+            payload["rc"] = {
+                f"rc_{index + 1}": int(value)
+                for index, value in enumerate(rc_pwm)
+            }
         return (json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
 
 
@@ -291,8 +319,10 @@ class LatestCSVReader:
 
 
 class StateMapper:
-    def __init__(self, strict: bool):
+    def __init__(self, strict: bool, rebase_time: bool = True):
         self.strict = strict
+        self.rebase_time = rebase_time
+        self.source_time_zero: Optional[float] = None
         self.last_source_timestamp: Optional[float] = None
         self.last_outgoing_timestamp: Optional[float] = None
         self.last_signature: Optional[str] = None
@@ -451,10 +481,14 @@ class StateMapper:
             raise StateError(f"backward source timestamp: {timestamp} < {self.last_source_timestamp}")
 
         reused = self.last_signature == signature
-        outgoing_timestamp = timestamp
+        if self.rebase_time:
+            if self.source_time_zero is None:
+                self.source_time_zero = timestamp
+            outgoing_timestamp = timestamp - self.source_time_zero + MIN_OUTGOING_TIMESTAMP_STEP_S
+        else:
+            outgoing_timestamp = timestamp
         if self.last_outgoing_timestamp is not None and outgoing_timestamp <= self.last_outgoing_timestamp:
-            outgoing_timestamp = self.last_outgoing_timestamp + 1.0e-6
-
+            outgoing_timestamp = self.last_outgoing_timestamp + MIN_OUTGOING_TIMESTAMP_STEP_S
         state = SimState(
             timestamp_s=outgoing_timestamp,
             source_timestamp_s=timestamp,
@@ -473,6 +507,7 @@ class StateMapper:
             row_monotonic_time=row_monotonic_time,
             reused_source_row=reused,
             missing_fields=tuple(missing),
+            source_row=dict(row),
         )
         state.validate()
         return state
@@ -552,6 +587,8 @@ def make_log_row(
     state: Optional[SimState] = None,
     reply_bytes: int = 0,
     error_reason: str = "",
+    previous_sent_timestamp: Optional[float] = None,
+    reply_reason: str = "",
     actuator_command: Optional[NormalizedActuatorCommand] = None,
     control_packet: Optional[ControlPacket] = None,
 ) -> Dict[str, object]:
@@ -566,6 +603,11 @@ def make_log_row(
         "packet_valid": int(packet_valid),
         "state_age_ms": "" if state is None else f"{(now - state.row_monotonic_time) * 1000.0:.3f}",
         "simulation_timestamp": "" if state is None else f"{state.timestamp_s:.9f}",
+        "source_simulation_timestamp": "" if state is None else f"{state.source_timestamp_s:.9f}",
+        "previous_sent_timestamp": "" if previous_sent_timestamp is None else f"{previous_sent_timestamp:.9f}",
+        "state_reused": "" if state is None else int(state.reused_source_row),
+        "reply_sent": int(reply_bytes > 0),
+        "reply_reason": reply_reason,
         "latitude": "" if state is None else f"{state.latitude_deg:.9f}",
         "longitude": "" if state is None else f"{state.longitude_deg:.9f}",
         "altitude": "" if state is None else f"{state.altitude_m:.3f}",
@@ -582,7 +624,105 @@ def make_log_row(
     }
     if actuator_command is not None:
         row.update(actuator_command.log_fields())
+    if control_packet is not None:
+        for index, pwm in enumerate(control_packet.pwm[:8], start=1):
+            row[f"pwm{index}"] = pwm
     return row
+
+
+B3_ENVELOPE_LIMITS = {
+    "altitude_m": (-100.0, 10000.0),
+    "airspeed_mps": (0.0, 250.0),
+    "velocity_ned_mps_abs": 300.0,
+    "velocity_total_mps": 350.0,
+    "gyro_rad_s_abs": 20.0,
+    "accel_body_mss_abs": 200.0,
+    "quaternion_norm": (0.99, 1.01),
+}
+
+
+def b3_state_envelope_offenders(state: SimState) -> Tuple[str, ...]:
+    checks = {
+        "timestamp_s": state.timestamp_s,
+        "source_timestamp_s": state.source_timestamp_s,
+        "latitude_deg": state.latitude_deg,
+        "longitude_deg": state.longitude_deg,
+        "altitude_m": state.altitude_m,
+        "roll_rad": state.roll_rad,
+        "pitch_rad": state.pitch_rad,
+        "yaw_rad": state.yaw_rad,
+        "airspeed_mps": state.airspeed_mps,
+        "gyro_p_rad_s": state.gyro_rad_s[0],
+        "gyro_q_rad_s": state.gyro_rad_s[1],
+        "gyro_r_rad_s": state.gyro_rad_s[2],
+        "accel_body_x_mss": state.accel_body_mss[0],
+        "accel_body_y_mss": state.accel_body_mss[1],
+        "accel_body_z_mss": state.accel_body_mss[2],
+        "velocity_n_mps": state.velocity_ned_mps[0],
+        "velocity_e_mps": state.velocity_ned_mps[1],
+        "velocity_d_mps": state.velocity_ned_mps[2],
+        "q1": state.quaternion[0],
+        "q2": state.quaternion[1],
+        "q3": state.quaternion[2],
+        "q4": state.quaternion[3],
+    }
+    offenders = [
+        f"{name}=nonfinite:{value}"
+        for name, value in checks.items()
+        if not math.isfinite(value)
+    ]
+    altitude_min, altitude_max = B3_ENVELOPE_LIMITS["altitude_m"]
+    if not altitude_min <= state.altitude_m <= altitude_max:
+        offenders.append(f"altitude_m={state.altitude_m:.6g}:outside[{altitude_min},{altitude_max}]")
+    tas_min, tas_max = B3_ENVELOPE_LIMITS["airspeed_mps"]
+    if not tas_min <= state.airspeed_mps <= tas_max:
+        offenders.append(f"airspeed_mps={state.airspeed_mps:.6g}:outside[{tas_min},{tas_max}]")
+    velocity_axis_limit = B3_ENVELOPE_LIMITS["velocity_ned_mps_abs"]
+    for axis, value in zip(("n", "e", "d"), state.velocity_ned_mps):
+        if abs(value) >= velocity_axis_limit:
+            offenders.append(f"velocity_{axis}_mps={value:.6g}:abs>={velocity_axis_limit}")
+    velocity_total = math.sqrt(sum(value * value for value in state.velocity_ned_mps))
+    velocity_total_limit = B3_ENVELOPE_LIMITS["velocity_total_mps"]
+    if velocity_total >= velocity_total_limit:
+        offenders.append(f"velocity_total_mps={velocity_total:.6g}:>={velocity_total_limit}")
+    gyro_limit = B3_ENVELOPE_LIMITS["gyro_rad_s_abs"]
+    for axis, value in zip(("p", "q", "r"), state.gyro_rad_s):
+        if abs(value) >= gyro_limit:
+            offenders.append(f"gyro_{axis}_rad_s={value:.6g}:abs>={gyro_limit}")
+    accel_limit = B3_ENVELOPE_LIMITS["accel_body_mss_abs"]
+    for axis, value in zip(("x", "y", "z"), state.accel_body_mss):
+        if abs(value) >= accel_limit:
+            offenders.append(f"accel_body_{axis}_mss={value:.6g}:abs>={accel_limit}")
+    quat_norm = math.sqrt(sum(value * value for value in state.quaternion))
+    quat_min, quat_max = B3_ENVELOPE_LIMITS["quaternion_norm"]
+    if not quat_min <= quat_norm <= quat_max:
+        offenders.append(f"quaternion_norm={quat_norm:.9f}:outside[{quat_min},{quat_max}]")
+    return tuple(offenders)
+
+
+def validate_b3_state_envelope(state: SimState) -> None:
+    offenders = b3_state_envelope_offenders(state)
+    if offenders:
+        raise StateEnvelopeError(offenders)
+
+
+def write_b3_state_envelope_abort(path: Optional[str], state: SimState, offenders: Sequence[str]) -> None:
+    if not path:
+        return
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    row = dict(state.source_row or {})
+    row.update({
+        "b3_abort_source_timestamp_s": f"{state.source_timestamp_s:.9f}",
+        "b3_abort_outgoing_timestamp_s": f"{state.timestamp_s:.9f}",
+        "b3_abort_offenders": ";".join(offenders),
+    })
+    fieldnames = list(row)
+    with open(path, "w", newline="", encoding="utf-8") as abort_file:
+        writer = csv.DictWriter(abort_file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerow(row)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -591,10 +731,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--listen-port", type=int, default=9002)
     parser.add_argument("--state-file", default=DEFAULT_STATE_FILE)
     parser.add_argument("--rate-limit-hz", type=float, default=0.0, help="Maximum reply rate; 0 disables limiting")
+    parser.add_argument(
+        "--fresh-state-wait-ms",
+        type=float,
+        default=80.0,
+        help="Maximum time to wait for a newer JSBSim CSV row before reporting NO_FRESH_STATE",
+    )
+    parser.add_argument(
+        "--allow-state-reuse",
+        action="store_true",
+        help="Permit replying with a reused JSBSim source row by advancing the outgoing timestamp",
+    )
+    parser.add_argument(
+        "--no-rebase-time",
+        action="store_true",
+        help="Send raw JSBSim source timestamps instead of rebasing the first accepted row to t=0",
+    )
     parser.add_argument("--state-timeout-ms", type=float, default=500.0)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="Decode requests but do not send replies")
     parser.add_argument("--log-csv", default=None)
+    parser.add_argument("--save-first-request", default=None, help="Write the exact first SIM_JSON request bytes to this path")
+    parser.add_argument("--save-first-reply", default=None, help="Write the exact first SIM_JSON reply bytes to this path")
+    parser.add_argument(
+        "--b3-state-envelope-guard",
+        action="store_true",
+        help="Enable SR-75 B3 bounded-test state envelope abort",
+    )
+    parser.add_argument(
+        "--b3-state-envelope-abort-row",
+        default="/tmp/sr75_b3/b3_state_envelope_abort.csv",
+        help="CSV path for the offending source row when --b3-state-envelope-guard aborts",
+    )
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--mock-state", action="store_true")
     parser.add_argument("--strict", action="store_true")
@@ -612,7 +780,43 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Opt-in UDP JSBSim command target, for example udp:127.0.0.1:5600",
     )
+    parser.add_argument("--rc1-pwm", type=int, default=None, help="Optional fixed SIM_JSON RC1 input PWM")
+    parser.add_argument("--rc2-pwm", type=int, default=None, help="Optional fixed SIM_JSON RC2 input PWM")
+    parser.add_argument("--rc3-pwm", type=int, default=None, help="Optional fixed SIM_JSON RC3 input PWM")
+    parser.add_argument("--rc4-pwm", type=int, default=None, help="Optional fixed SIM_JSON RC4 input PWM")
+    parser.add_argument("--rc5-pwm", type=int, default=None, help="Optional fixed SIM_JSON RC5 input PWM")
+    parser.add_argument("--rc6-pwm", type=int, default=None, help="Optional fixed SIM_JSON RC6 input PWM")
+    parser.add_argument("--rc7-pwm", type=int, default=None, help="Optional fixed SIM_JSON RC7 input PWM")
+    parser.add_argument("--rc8-pwm", type=int, default=None, help="Optional fixed SIM_JSON RC8 input PWM")
+    parser.add_argument(
+        "--invalid-active-pwm-neutral",
+        action="store_true",
+        help="Treat out-of-range PWM on mapped actuator channels as a neutral software command",
+    )
     return parser
+
+
+def fixed_rc_inputs(args: argparse.Namespace) -> Optional[Tuple[int, ...]]:
+    values = (
+        args.rc1_pwm,
+        args.rc2_pwm,
+        args.rc3_pwm,
+        args.rc4_pwm,
+        args.rc5_pwm,
+        args.rc6_pwm,
+        args.rc7_pwm,
+        args.rc8_pwm,
+    )
+    if all(value is None for value in values):
+        return None
+
+    rc_pwm = []
+    for index, value in enumerate(values, start=1):
+        pwm = 1500 if value is None else value
+        if pwm < 800 or pwm > 2200:
+            raise ValueError(f"RC{index} PWM out of range: {pwm}")
+        rc_pwm.append(pwm)
+    return tuple(rc_pwm)
 
 
 def build_actuator_channel_map(args: argparse.Namespace) -> ActuatorChannelMap:
@@ -626,10 +830,36 @@ def build_actuator_channel_map(args: argparse.Namespace) -> ActuatorChannelMap:
     )
     return ActuatorChannelMap(
         channels=dict(channel_map.channels),
+        optional_roles=tuple(channel_map.optional_roles),
         timeout_ms=timeout_ms,
         surface_deadband=surface_deadband,
         throttle_deadband=throttle_deadband,
     )
+
+
+@dataclass(frozen=True)
+class InvalidActivePWM:
+    role: str
+    channel: int
+    pwm: object
+    reason: str
+
+
+def active_pwm_invalid(command: NormalizedActuatorCommand, channel_map: ActuatorChannelMap) -> Optional[InvalidActivePWM]:
+    if not command.pwm:
+        return None
+    for role in sorted(channel_map.channels):
+        channel = channel_map.channels[role]
+        if channel < 1 or channel > len(command.pwm):
+            if channel_map.role_is_optional(role):
+                continue
+            return InvalidActivePWM(role=role, channel=channel, pwm="", reason="missing")
+        pwm = command.pwm[channel - 1]
+        if channel_map.role_is_optional(role) and pwm == 0:
+            continue
+        if pwm < 800 or pwm > 2200:
+            return InvalidActivePWM(role=role, channel=channel, pwm=pwm, reason="out_of_range")
+    return None
 
 
 def jsbsim_command_from_actuator(
@@ -648,12 +878,61 @@ def jsbsim_command_from_actuator(
     )
 
 
+def wait_for_reply_slot(last_reply_mono: float, min_interval: float) -> bool:
+    if min_interval <= 0.0 or last_reply_mono <= 0.0:
+        return False
+    remaining = min_interval - (time.monotonic() - last_reply_mono)
+    if remaining <= 0.0:
+        return False
+    time.sleep(remaining)
+    return True
+
+
+def read_reply_state(
+    args: argparse.Namespace,
+    reader: LatestCSVReader,
+    mapper: StateMapper,
+    mock_source: MockStateSource,
+) -> SimState:
+    if args.mock_state:
+        return mock_source.state()
+
+    deadline = time.monotonic() + max(0.0, args.fresh_state_wait_ms) / 1000.0
+    while True:
+        row, signature, mtime = reader.read_latest()
+        row_age_ms = (time.time() - mtime) * 1000.0
+        if row_age_ms > args.state_timeout_ms:
+            raise StateError(f"STALE_STATE: latest row age {row_age_ms:.1f} ms")
+        state = mapper.state_from_csv(row, signature, time.monotonic() - (row_age_ms / 1000.0))
+        if mapper.last_source_timestamp is None or state.source_timestamp_s > mapper.last_source_timestamp:
+            return state
+
+        if args.allow_state_reuse:
+            if mapper.last_outgoing_timestamp is not None and state.timestamp_s <= mapper.last_outgoing_timestamp:
+                state.timestamp_s = mapper.last_outgoing_timestamp + 1.0e-6
+            return state
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            raise StateError(
+                "NO_FRESH_STATE: "
+                f"latest source timestamp {state.source_timestamp_s:.9f} "
+                f"matches previous sent timestamp {mapper.last_source_timestamp:.9f}"
+            )
+        time.sleep(min(0.002, remaining))
+
+
 def main() -> int:
     args = build_arg_parser().parse_args()
     try:
         actuator_channel_map = build_actuator_channel_map(args)
     except ActuatorMapError as exc:
         print(f"ERROR: actuator channel map invalid: {exc}", file=sys.stderr)
+        return 2
+    try:
+        rc_pwm = fixed_rc_inputs(args)
+    except ValueError as exc:
+        print(f"ERROR: fixed RC input invalid: {exc}", file=sys.stderr)
         return 2
     command_sink = None
     if args.jsbsim_command_target:
@@ -672,15 +951,19 @@ def main() -> int:
     print("RATO/ENGINE/RELAY OUTPUT: DISABLED")
     mode = "LOG_ONLY" if command_sink is None else "JSBSIM_COMMAND"
     print(f"ACTUATOR DECODE: {mode} {describe_channel_map(actuator_channel_map)}")
+    if rc_pwm is not None:
+        print(f"SIM_JSON RC INPUT: {','.join(str(value) for value in rc_pwm)}")
 
     csv_file, log_writer = open_log(args.log_csv)
     reader = LatestCSVReader(args.state_file)
-    mapper = StateMapper(strict=args.strict)
+    mapper = StateMapper(strict=args.strict, rebase_time=not args.no_rebase_time)
     mock_source = MockStateSource()
     actuator_bridge = SoftwareActuatorBridge(actuator_channel_map)
     min_interval = 1.0 / args.rate_limit_hz if args.rate_limit_hz and args.rate_limit_hz > 0.0 else 0.0
     last_reply_mono = 0.0
     request_count = 0
+    saved_first_request = False
+    saved_first_reply = False
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -710,12 +993,29 @@ def main() -> int:
                             print("JSBSIM_COMMAND stale=1 elev=0.000 ail=0.000 rud=0.000 thr=0.000 rato=0.000")
                 continue
             request_count += 1
+            if args.save_first_request and not saved_first_request:
+                with open(args.save_first_request, "wb") as request_file:
+                    request_file.write(data)
+                saved_first_request = True
+                if args.verbose:
+                    print(f"SAVED_FIRST_REQUEST {args.save_first_request} bytes={len(data)}")
             try:
                 packet = decode_control_packet(data)
             except ValueError as exc:
                 reason = f"MALFORMED_PACKET: {exc}"
                 print(reason)
-                write_log(log_writer, csv_file, make_log_row(request_count, source, False, started, error_reason=reason))
+                write_log(
+                    log_writer,
+                    csv_file,
+                    make_log_row(
+                        request_count=request_count,
+                        source=source,
+                        packet_valid=False,
+                        started=started,
+                        error_reason=reason,
+                        reply_reason=reason,
+                    ),
+                )
                 if args.once:
                     return 1
                 continue
@@ -727,6 +1027,19 @@ def main() -> int:
                 actuator_reason = f"ACTUATOR_MAP_ERROR: {exc}"
                 print(actuator_reason)
                 actuator_command = actuator_bridge.current_command(started)
+            invalid_pwm = active_pwm_invalid(actuator_command, actuator_channel_map)
+            if args.invalid_active_pwm_neutral and invalid_pwm is not None:
+                actuator_reason = (
+                    "ACTUATOR_INVALID_ACTIVE_PWM_NEUTRAL "
+                    f"role={invalid_pwm.role} channel={invalid_pwm.channel} "
+                    f"pwm={invalid_pwm.pwm} reason={invalid_pwm.reason}"
+                )
+                print(
+                    "INVALID_ACTIVE_PWM "
+                    f"role={invalid_pwm.role} channel={invalid_pwm.channel} "
+                    f"pwm={invalid_pwm.pwm} reason={invalid_pwm.reason}"
+                )
+                actuator_command = NormalizedActuatorCommand.neutral()
 
             if command_sink is not None:
                 try:
@@ -759,36 +1072,45 @@ def main() -> int:
                     f"rato={actuator_command.rato:.3f} stale={int(actuator_command.stale)}{warnings}"
                 )
 
-            now = time.monotonic()
-            if min_interval > 0.0 and now - last_reply_mono < min_interval:
-                reason = "RATE_LIMIT"
+            previous_sent_timestamp = mapper.last_outgoing_timestamp
+            rate_waited = wait_for_reply_slot(last_reply_mono, min_interval)
+
+            try:
+                state = read_reply_state(args, reader, mapper, mock_source)
+                if args.b3_state_envelope_guard:
+                    validate_b3_state_envelope(state)
+                payload = state.to_json_bytes(rc_pwm=rc_pwm)
+            except StateEnvelopeError as exc:
+                offenders = tuple(exc.offenders)
+                reason = f"B3_STATE_ENVELOPE_ABORT: {';'.join(offenders)}"
+                print(f"B3_STATE_ENVELOPE_ABORT offenders={';'.join(offenders)}")
+                write_b3_state_envelope_abort(args.b3_state_envelope_abort_row, state, offenders)
+                if command_sink is not None:
+                    try:
+                        command_sink.send(
+                            jsbsim_command_from_actuator(NormalizedActuatorCommand.neutral(), timestamp_s=started)
+                        )
+                        print("B3_STATE_ENVELOPE_ABORT neutral_jsbsim_command_sent=1")
+                    except JSBSimCommandError as command_exc:
+                        reason = f"{reason};JSBSIM_NEUTRAL_COMMAND_ERROR: {command_exc}"
+                        print(f"B3_STATE_ENVELOPE_ABORT neutral_jsbsim_command_sent=0 error={command_exc}")
                 write_log(
                     log_writer,
                     csv_file,
                     make_log_row(
-                        request_count,
-                        source,
-                        True,
-                        started,
+                        request_count=request_count,
+                        source=source,
+                        packet_valid=True,
+                        started=started,
+                        state=state,
                         error_reason=reason,
+                        previous_sent_timestamp=previous_sent_timestamp,
+                        reply_reason="B3_STATE_ENVELOPE_ABORT",
                         actuator_command=actuator_command,
                         control_packet=packet,
                     ),
                 )
-                if args.verbose:
-                    print(reason)
-                continue
-
-            try:
-                if args.mock_state:
-                    state = mock_source.state()
-                else:
-                    row, signature, mtime = reader.read_latest()
-                    row_age_ms = (time.time() - mtime) * 1000.0
-                    if row_age_ms > args.state_timeout_ms:
-                        raise StateError(f"STALE_STATE: latest row age {row_age_ms:.1f} ms")
-                    state = mapper.state_from_csv(row, signature, time.monotonic() - (row_age_ms / 1000.0))
-                payload = state.to_json_bytes()
+                return 3
             except StateError as exc:
                 reason = str(exc)
                 if reason.startswith("STALE_STATE"):
@@ -801,11 +1123,13 @@ def main() -> int:
                     log_writer,
                     csv_file,
                     make_log_row(
-                        request_count,
-                        source,
-                        True,
-                        started,
+                        request_count=request_count,
+                        source=source,
+                        packet_valid=True,
+                        started=started,
                         error_reason=reason,
+                        previous_sent_timestamp=previous_sent_timestamp,
+                        reply_reason=reason,
                         actuator_command=actuator_command,
                         control_packet=packet,
                     ),
@@ -815,14 +1139,24 @@ def main() -> int:
                 continue
 
             reply_bytes = 0
+            reply_reason = "RATE_WAIT" if rate_waited else "OK"
             if args.dry_run:
                 reason = "DRY_RUN"
+                reply_reason = reason
                 if args.verbose:
                     print(f"DRY_RUN would send {len(payload)} bytes to {source[0]}:{source[1]}")
             else:
+                if args.save_first_reply and not saved_first_reply:
+                    with open(args.save_first_reply, "wb") as reply_file:
+                        reply_file.write(payload)
+                    saved_first_reply = True
+                    if args.verbose:
+                        print(f"SAVED_FIRST_REPLY {args.save_first_reply} bytes={len(payload)}")
                 reply_bytes = sock.sendto(payload, source)
                 last_reply_mono = time.monotonic()
                 reason = actuator_reason
+                if actuator_reason and reply_reason == "OK":
+                    reply_reason = actuator_reason
                 if not args.mock_state:
                     mapper.accept_state(state)
                 if args.verbose:
@@ -838,15 +1172,17 @@ def main() -> int:
                 log_writer,
                 csv_file,
                 make_log_row(
-                    request_count,
-                    source,
-                    True,
-                    started,
-                    state,
-                    reply_bytes,
-                    reason,
-                    actuator_command,
-                    packet,
+                    request_count=request_count,
+                    source=source,
+                    packet_valid=True,
+                    started=started,
+                    state=state,
+                    reply_bytes=reply_bytes,
+                    error_reason=reason,
+                    previous_sent_timestamp=previous_sent_timestamp,
+                    reply_reason=reply_reason,
+                    actuator_command=actuator_command,
+                    control_packet=packet,
                 ),
             )
             if args.once:

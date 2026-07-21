@@ -1,0 +1,16 @@
+{
+  "channels": {
+    "left_elevon": 1,
+    "right_elevon": 2,
+    "rudder": 4,
+    "throttle_left": 3,
+    "throttle_right": 3,
+    "rato": 7
+  },
+  "optional_roles": [
+    "rato"
+  ],
+  "timeout_ms": 250,
+  "surface_deadband": 0.02,
+  "throttle_deadband": 0.01
+}

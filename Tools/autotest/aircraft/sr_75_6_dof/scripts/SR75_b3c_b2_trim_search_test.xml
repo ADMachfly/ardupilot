@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<runscript xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="http://jsbsim.sf.net/JSBSimScript.xsd"
+    name="SR75 Layer 2J-B3C-B2 bounded longitudinal reference trim search">
+
+  <description>
+    JSBSim-only trim search. Both turbojets running, RATO off. Engages
+    JSBSim's own trim solver at t=0 so alpha/elevator/throttle are solved
+    for level 1g flight at the case airspeed/altitude, then holds controls
+    fixed for 5 seconds to score against the tightened bounded-reference
+    acceptance criteria.
+  </description>
+
+  <use aircraft="sr_75_6_dof" initialize="layer2j_b3_trim_init"/>
+
+  <run start="0.0" end="5.0" dt="0.008333">
+    <event name="Arm turbojets, RATO off">
+      <condition>simulation/sim-time-sec ge 0.0</condition>
+      <set name="propulsion/engine[0]/set-running" value="1"/>
+      <set name="propulsion/engine[1]/set-running" value="1"/>
+      <set name="propulsion/engine[2]/set-running" value="0"/>
+      <set name="fcs/rato-throttle-cmd-norm" value="0.0"/>
+      <set name="fcs/rudder-cmd-norm" value="0.0"/>
+      <set name="fcs/aileron-cmd-norm" value="0.0"/>
+      <notify/>
+    </event>
+    <event name="Trim for level flight" persistent="false">
+      <condition>simulation/sim-time-sec ge 0.008333</condition>
+      <set name="simulation/do_simple_trim" value="1"/>
+      <notify/>
+    </event>
+  </run>
+
+  <output name="sr75_b3c_b2_trim_search.csv" type="CSV" rate="50">
+    <property>simulation/sim-time-sec</property>
+    <property>attitude/phi-deg</property>
+    <property>attitude/theta-deg</property>
+    <property>aero/alpha-deg</property>
+    <property>fcs/elevator-cmd-norm</property>
+    <property>fcs/turbojet-throttle-cmd-norm</property>
+    <property>propulsion/engine[0]/thrust-lbs</property>
+    <property>propulsion/engine[1]/thrust-lbs</property>
+    <property>propulsion/engine[2]/thrust-lbs</property>
+    <property>velocities/vt-fps</property>
+    <property>velocities/p-rad_sec</property>
+    <property>velocities/q-rad_sec</property>
+    <property>velocities/r-rad_sec</property>
+    <property>velocities/h-dot-fps</property>
+    <property>position/h-sl-ft</property>
+  </output>
+
+</runscript>

@@ -37,7 +37,7 @@ JSBSIM_PROPERTIES = {
     "elevator": "fcs/elevator-cmd-norm",
     "aileron": "fcs/aileron-cmd-norm",
     "rudder": "fcs/rudder-cmd-norm",
-    "turbojet_throttle": "fcs/throttle-cmd-norm",
+    "turbojet_throttle": "fcs/turbojet-throttle-cmd-norm",
     "rato_throttle": "fcs/rato-throttle-cmd-norm",
 }
 
@@ -74,6 +74,7 @@ def neutral_pwm_values(channel_count: int = 16) -> List[int]:
 @dataclass(frozen=True)
 class ActuatorChannelMap:
     channels: Dict[str, int] = field(default_factory=lambda: dict(DEFAULT_CHANNELS))
+    optional_roles: Tuple[str, ...] = field(default_factory=tuple)
     timeout_ms: float = DEFAULT_TIMEOUT_MS
     surface_deadband: float = DEFAULT_SURFACE_DEADBAND
     throttle_deadband: float = DEFAULT_THROTTLE_DEADBAND
@@ -86,6 +87,9 @@ class ActuatorChannelMap:
             if name not in DEFAULT_CHANNELS:
                 raise ActuatorMapError(f"unknown channel role: {name}")
             _parse_channel(name, channel)
+        unknown_optional = set(self.optional_roles) - set(DEFAULT_CHANNELS)
+        if unknown_optional:
+            raise ActuatorMapError(f"unknown optional channel role: {','.join(sorted(unknown_optional))}")
         if self.timeout_ms <= 0.0 or not math.isfinite(self.timeout_ms):
             raise ActuatorMapError("timeout_ms must be finite and positive")
         if self.surface_deadband < 0.0 or not math.isfinite(self.surface_deadband):
@@ -111,6 +115,7 @@ class ActuatorChannelMap:
                 raise ActuatorMapError(f"unknown channel role: {name}")
             channels[name] = _parse_channel(name, channel)
 
+        optional_roles = _parse_optional_roles(data)
         timeout_ms = _parse_float(data, "timeout_ms", DEFAULT_TIMEOUT_MS)
         surface_deadband = _parse_float(data, "surface_deadband", DEFAULT_SURFACE_DEADBAND)
         throttle_deadband = _parse_float(data, "throttle_deadband", DEFAULT_THROTTLE_DEADBAND)
@@ -118,12 +123,17 @@ class ActuatorChannelMap:
             raise ActuatorMapError("timeout_ms must be positive")
         if surface_deadband < 0.0 or throttle_deadband < 0.0:
             raise ActuatorMapError("deadbands must be non-negative")
-        return cls(channels, timeout_ms, surface_deadband, throttle_deadband)
+        return cls(channels, tuple(sorted(optional_roles)), timeout_ms, surface_deadband, throttle_deadband)
 
     def validate_for_pwm_count(self, pwm_count: int) -> None:
         for name, channel in self.channels.items():
             if channel < 1 or channel > pwm_count:
+                if name in self.optional_roles:
+                    continue
                 raise ActuatorMapError(f"{name} channel {channel} outside packet channel count {pwm_count}")
+
+    def role_is_optional(self, name: str) -> bool:
+        return name in self.optional_roles
 
 
 def _parse_channel(name: str, value: object) -> int:
@@ -142,6 +152,20 @@ def _parse_float(data: Mapping[str, object], name: str, default: float) -> float
     if not math.isfinite(value):
         raise ActuatorMapError(f"{name} must be finite")
     return value
+
+
+def _parse_optional_roles(data: Mapping[str, object]) -> Tuple[str, ...]:
+    raw_roles = data.get("optional_roles", [])
+    if not isinstance(raw_roles, list):
+        raise ActuatorMapError("optional_roles must be a JSON list")
+    roles = []
+    for role in raw_roles:
+        if not isinstance(role, str):
+            raise ActuatorMapError("optional_roles values must be strings")
+        if role not in DEFAULT_CHANNELS:
+            raise ActuatorMapError(f"unknown optional channel role: {role}")
+        roles.append(role)
+    return tuple(sorted(set(roles)))
 
 
 @dataclass(frozen=True)
@@ -214,9 +238,14 @@ class SoftwareActuatorBridge:
     ) -> NormalizedActuatorCommand:
         now = time.monotonic() if now is None else now
         self.channel_map.validate_for_pwm_count(len(pwm))
-        warnings = list(_validate_pwm_values(pwm))
+        warnings = list(_validate_pwm_values(pwm, self.channel_map))
 
         def channel_pwm(name: str) -> int:
+            channel = self.channel_map.channels[name]
+            if self.channel_map.role_is_optional(name) and channel > len(pwm):
+                return PWM_LOW
+            if self.channel_map.role_is_optional(name) and int(pwm[channel - 1]) == 0:
+                return PWM_LOW
             return int(pwm[self.channel_map.channels[name] - 1])
 
         left = normalize_surface_pwm(channel_pwm("left_elevon"), self.channel_map.surface_deadband)
@@ -257,8 +286,18 @@ class SoftwareActuatorBridge:
         return self.last_command
 
 
-def _validate_pwm_values(pwm: Sequence[int]) -> Iterable[str]:
+def _validate_pwm_values(pwm: Sequence[int], channel_map: ActuatorChannelMap) -> Iterable[str]:
+    mapped_channels = set(channel_map.channels.values())
+    optional_zero_channels = {
+        channel_map.channels[role]
+        for role in channel_map.optional_roles
+        if role in channel_map.channels
+    }
     for index, value in enumerate(pwm, start=1):
+        if index not in mapped_channels:
+            continue
+        if index in optional_zero_channels and value == 0:
+            continue
         if isinstance(value, bool) or not isinstance(value, int):
             yield f"ch{index}:malformed"
             continue
@@ -269,7 +308,8 @@ def _validate_pwm_values(pwm: Sequence[int]) -> Iterable[str]:
 def describe_channel_map(channel_map: ActuatorChannelMap) -> str:
     parts: List[str] = []
     for name in sorted(channel_map.channels):
-        parts.append(f"{name}=CH{channel_map.channels[name]}")
+        optional = "?" if channel_map.role_is_optional(name) else ""
+        parts.append(f"{name}=CH{channel_map.channels[name]}{optional}")
     parts.append(f"timeout_ms={channel_map.timeout_ms:g}")
     parts.append(f"surface_deadband={channel_map.surface_deadband:g}")
     parts.append(f"throttle_deadband={channel_map.throttle_deadband:g}")

@@ -21,7 +21,7 @@ The JSBSim script side uses a local UDP input socket:
   <property>fcs/elevator-cmd-norm</property>
   <property>fcs/aileron-cmd-norm</property>
   <property>fcs/rudder-cmd-norm</property>
-  <property>fcs/throttle-cmd-norm</property>
+  <property>fcs/turbojet-throttle-cmd-norm</property>
   <property>fcs/rato-throttle-cmd-norm</property>
 </input>
 ```
@@ -49,10 +49,10 @@ rudder   -> fcs/rudder-cmd-norm
 
 The active twin turbojet FADEC actuator in
 `Tools/autotest/aircraft/sr_75_6_dof/Systems/SR75_fcs.xml` reads
-`fcs/throttle-cmd-norm` and writes `fcs/throttle-cmd-norm[0]` and
-`fcs/throttle-cmd-norm[1]`. The older declared property
-`fcs/turbojet-throttle-cmd-norm` is not the active FCS input, so B2 writes the
-normalized turbojet command to `fcs/throttle-cmd-norm`.
+`fcs/turbojet-throttle-cmd-norm` and writes `fcs/throttle-cmd-norm[0]` and
+`fcs/throttle-cmd-norm[1]`. The scalar `fcs/throttle-cmd-norm` name aliases the
+engine-0 indexed throttle in JSBSim CSV/catalog output, so B2/B3 use the
+dedicated turbojet command property as the shared FADEC input.
 
 The simulated RATO command is:
 
