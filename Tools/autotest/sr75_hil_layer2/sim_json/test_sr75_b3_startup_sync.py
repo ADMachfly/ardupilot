@@ -10,13 +10,16 @@ from io import StringIO
 from sr75_sim_json_actuator_bridge import ActuatorChannelMap, NormalizedActuatorCommand
 from sr75_sim_json_responder import (
     B3StartupPhase,
+    B3StartupReadiness,
     B3StartupSync,
     B3StartupSyncTarget,
     B3TimingQualityGate,
     ControlPacket,
+    GRAVITY_MSS,
     SERVO16_MAGIC,
     StateMapper,
     degrees_to_radians,
+    gravity_body_mss,
     make_log_row,
     print_b3_startup_scoring_debug,
 )
@@ -84,12 +87,126 @@ def negative_target():
 
 
 class TestB3StartupSync(unittest.TestCase):
+    def assert_gravity_vector(self, vector, expected_signs):
+        magnitude = math.sqrt(sum(value * value for value in vector))
+        self.assertAlmostEqual(magnitude, GRAVITY_MSS, places=6)
+        for value, expected_sign in zip(vector, expected_signs):
+            if expected_sign > 0:
+                self.assertGreater(value, 0.0)
+            elif expected_sign < 0:
+                self.assertLess(value, 0.0)
+            else:
+                self.assertAlmostEqual(value, 0.0, places=6)
+
     def released_sync_with_offset(self, offset):
         sync = B3StartupSync(target())
         sync._last_hold_timestamp = offset
         raw_valid = decoded_command(VALID_PWM)
         sync.maybe_release(raw_valid, CHANNEL_MAP, host_time=10.0, pwm=raw_valid.pwm)
         return sync, raw_valid
+
+    def test_gravity_body_vector_level_and_attitude_signs(self):
+        cases = (
+            (0.0, 0.0, (0, 0, -1)),
+            (0.0, 8.0, (1, 0, -1)),
+            (0.0, -8.0, (-1, 0, -1)),
+            (10.0, 0.0, (0, -1, -1)),
+            (-10.0, 0.0, (0, 1, -1)),
+        )
+        for roll_deg, pitch_deg, signs in cases:
+            vector = gravity_body_mss(degrees_to_radians(roll_deg), degrees_to_radians(pitch_deg), 0.0)
+            self.assert_gravity_vector(vector, signs)
+
+    def test_held_state_uses_attitude_consistent_gravity(self):
+        cases = (
+            B3StartupSyncTarget(roll_deg=0.0, pitch_deg=0.0),
+            B3StartupSyncTarget(roll_deg=0.0, pitch_deg=8.0),
+            B3StartupSyncTarget(roll_deg=0.0, pitch_deg=-8.0),
+            B3StartupSyncTarget(roll_deg=10.0, pitch_deg=0.0),
+            B3StartupSyncTarget(roll_deg=-10.0, pitch_deg=0.0),
+        )
+        for tgt in cases:
+            state = tgt.held_state(1.0)
+            expected = gravity_body_mss(state.roll_rad, state.pitch_rad, state.yaw_rad)
+            for actual, want in zip(state.accel_body_mss, expected):
+                self.assertAlmostEqual(actual, want, places=9)
+            self.assertAlmostEqual(math.sqrt(sum(value * value for value in state.accel_body_mss)), GRAVITY_MSS)
+
+    def test_state_mapper_missing_accel_fallback_uses_attitude_consistent_gravity(self):
+        row = {
+            "time_s": "12.0",
+            "lat_deg": "32.5",
+            "lon_deg": "74.3",
+            "alt_m": "3000.0",
+            "vn_mps": "69.0",
+            "ve_mps": "0.0",
+            "vd_mps": "0.0",
+            "roll_deg": "10.0",
+            "pitch_deg": "8.0",
+            "yaw_deg": "315.0",
+            "p_rad_s": "0.0",
+            "q_rad_s": "0.0",
+            "r_rad_s": "0.0",
+            "airspeed_mps": "69.0",
+        }
+        mapper = StateMapper(strict=False)
+        state = mapper.state_from_csv(row, "row", 1.0)
+        expected = gravity_body_mss(state.roll_rad, state.pitch_rad, state.yaw_rad)
+
+        for actual, want in zip(state.accel_body_mss, expected):
+            self.assertAlmostEqual(actual, want, places=9)
+        self.assertIn("body accel X/Y/Z m/s^2", state.missing_fields)
+
+    def test_release_requires_configured_readiness(self):
+        sync = B3StartupSync(
+            target(),
+            B3StartupReadiness(required_valid_pwm_frames=3, fbwa_confirmed=True, ahrs_ekf_type=10),
+        )
+        raw_valid = decoded_command(VALID_PWM)
+
+        sync.maybe_release(raw_valid, CHANNEL_MAP, host_time=1.0, pwm=raw_valid.pwm)
+        self.assertEqual(sync.phase, B3StartupPhase.STARTUP_SYNC_HOLD)
+        self.assertEqual(sync.valid_pwm_frames, 1)
+        self.assertIn("waiting_for_consecutive_valid_pwm", sync.readiness_reason)
+
+        sync.maybe_release(raw_valid, CHANNEL_MAP, host_time=1.1, pwm=raw_valid.pwm)
+        self.assertEqual(sync.phase, B3StartupPhase.STARTUP_SYNC_HOLD)
+        sync.maybe_release(raw_valid, CHANNEL_MAP, host_time=1.2, pwm=raw_valid.pwm)
+
+        self.assertEqual(sync.phase, B3StartupPhase.RELEASED)
+        self.assertEqual(sync.release_count, 1)
+        self.assertIn("valid_pwm_frames=3", sync.readiness_reason)
+
+    def test_release_waits_for_external_fbwa_and_ahrs_confirmation(self):
+        raw_valid = decoded_command(VALID_PWM)
+        for readiness, expected in (
+            (B3StartupReadiness(required_valid_pwm_frames=1, fbwa_confirmed=False, ahrs_ekf_type=10), "fbwa"),
+            (B3StartupReadiness(required_valid_pwm_frames=1, fbwa_confirmed=True, ahrs_ekf_type=3), "ahrs"),
+        ):
+            sync = B3StartupSync(target(), readiness)
+            sync.maybe_release(raw_valid, CHANNEL_MAP, host_time=1.0, pwm=raw_valid.pwm)
+            self.assertEqual(sync.phase, B3StartupPhase.STARTUP_SYNC_HOLD)
+            self.assertIn(expected, sync.readiness_reason)
+
+    def test_release_readiness_rejects_stale_rato_and_invalid_pwm(self):
+        for raw_command, pwm, reason in (
+            (decoded_command(VALID_PWM, stale=True), VALID_PWM, "stale"),
+            (command_with(rato=0.1), VALID_PWM, "rato"),
+            (decoded_command(INVALID_PWM), INVALID_PWM, "valid_pwm"),
+        ):
+            sync = B3StartupSync(target())
+            sync.maybe_release(raw_command, CHANNEL_MAP, host_time=1.0, pwm=pwm)
+            self.assertEqual(sync.phase, B3StartupPhase.STARTUP_SYNC_HOLD)
+            self.assertIn(reason, sync.readiness_reason)
+
+    def test_post_release_preserves_genuine_rates(self):
+        sync, raw_valid = self.released_sync_with_offset(4.0)
+        real = make_real_state(target(), roll_deg=12.0, pitch_deg=-1.0, timestamp_s=0.000001,
+                               p=0.07, q=-0.08, r=0.09)
+
+        out = sync.process_post_release_state(real, raw_decoded_command=raw_valid, channel_map=CHANNEL_MAP)
+
+        self.assertEqual(out.gyro_rad_s, real.gyro_rad_s)
 
     def test_no_scoring_before_control_readiness(self):
         sync = B3StartupSync(target())

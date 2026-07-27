@@ -72,6 +72,30 @@ class TestB3PrecontrolHandover(unittest.TestCase):
             handover.resolve(raw_valid, raw_valid, CHANNEL_MAP, host_time=2.0)
         self.assertEqual(handover.handover_count, 1)
 
+    def test_b2_valid_pwm_can_be_held_until_startup_sync_release(self):
+        handover = B3PrecontrolHandover(reference())
+        raw_valid = decoded_command(VALID_PWM)
+
+        command, source = handover.resolve(
+            raw_valid,
+            raw_valid,
+            CHANNEL_MAP,
+            host_time=1.0,
+            hold_active_control=True,
+        )
+
+        self.assertEqual(source, B3CommandSource.PRECONTROL_REFERENCE)
+        self.assertAlmostEqual(command.elevator, -0.42)
+        self.assertTrue(handover.first_valid_pwm_seen)
+        self.assertEqual(handover.phase, B3ControlPhase.PRECONTROL_HOLD)
+        self.assertEqual(handover.handover_count, 0)
+
+        command, source = handover.resolve(raw_valid, raw_valid, CHANNEL_MAP, host_time=1.1)
+
+        self.assertEqual(source, B3CommandSource.ARDUPLANE_PWM)
+        self.assertEqual(handover.phase, B3ControlPhase.ACTIVE_CONTROL)
+        self.assertEqual(handover.handover_count, 1)
+
     def test_c_after_transition_decoded_pwm_commands_are_sent(self):
         handover = B3PrecontrolHandover(reference())
         raw_valid = decoded_command(VALID_PWM)

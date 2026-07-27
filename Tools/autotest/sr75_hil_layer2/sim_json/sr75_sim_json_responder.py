@@ -129,6 +129,10 @@ LOG_FIELDS = [
     "q_rad_s",
     "r_rad_s",
     "startup_sync_phase",
+    "startup_sync_readiness_reason",
+    "startup_sync_valid_pwm_frames",
+    "startup_sync_fbwa_confirmed",
+    "startup_sync_ahrs_ekf_type",
     "control_ready_timestamp",
     "release_timestamp",
     "first_post_release_state_timestamp",
@@ -206,6 +210,20 @@ def euler_to_quaternion(roll: float, pitch: float, yaw: float) -> Tuple[float, f
         cr * sp * cy + sr * cp * sy,
         cr * cp * sy - sr * sp * cy,
     ))
+
+
+def gravity_body_mss(roll: float, pitch: float, yaw: float) -> Tuple[float, float, float]:
+    """Return the stationary gravity vector resolved into SIM_JSON body axes."""
+    del yaw
+    sr = math.sin(roll)
+    cr = math.cos(roll)
+    sp = math.sin(pitch)
+    cp = math.cos(pitch)
+    return (
+        GRAVITY_MSS * sp,
+        -GRAVITY_MSS * sr * cp,
+        -GRAVITY_MSS * cr * cp,
+    )
 
 
 def normalize_quaternion(quat: Sequence[float]) -> Tuple[float, float, float, float]:
@@ -508,7 +526,7 @@ class StateMapper:
         az, _ = parse_float(row, ("accel_body_z_mss", "az_body_mss", "jsb_az_body_mss"), required=False)
         if ax is None or ay is None or az is None:
             self._missing_required("body accel X/Y/Z m/s^2", missing)
-            ax, ay, az = 0.0, 0.0, -GRAVITY_MSS
+            ax, ay, az = gravity_body_mss(roll, pitch, yaw)
 
         q1, _ = parse_float(row, ("q1", "quat_w", "quaternion_w"), required=False)
         q2, _ = parse_float(row, ("q2", "quat_x", "quaternion_x"), required=False)
@@ -721,6 +739,12 @@ def make_log_row(
         row["handover_count"] = 0
     if startup_sync is not None:
         row["startup_sync_phase"] = startup_sync.phase
+        row["startup_sync_readiness_reason"] = startup_sync.readiness_reason
+        row["startup_sync_valid_pwm_frames"] = startup_sync.valid_pwm_frames
+        row["startup_sync_fbwa_confirmed"] = int(startup_sync.readiness.fbwa_confirmed)
+        row["startup_sync_ahrs_ekf_type"] = (
+            "" if startup_sync.readiness.ahrs_ekf_type is None else startup_sync.readiness.ahrs_ekf_type
+        )
         row["control_ready_timestamp"] = (
             "" if startup_sync.control_ready_record is None
             else f"{startup_sync.control_ready_record['host_time']:.9f}"
@@ -739,6 +763,10 @@ def make_log_row(
         )
     else:
         row["startup_sync_phase"] = ""
+        row["startup_sync_readiness_reason"] = ""
+        row["startup_sync_valid_pwm_frames"] = ""
+        row["startup_sync_fbwa_confirmed"] = ""
+        row["startup_sync_ahrs_ekf_type"] = ""
         row["control_ready_timestamp"] = ""
         row["release_timestamp"] = ""
         row["first_post_release_state_timestamp"] = ""
@@ -1163,6 +1191,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "requested roll/pitch. Does not change behavior unless this flag is passed."
         ),
     )
+    parser.add_argument(
+        "--startup-sync-required-valid-pwm-frames",
+        type=int,
+        default=20,
+        help="Direct validation readiness: consecutive valid, non-stale, RATO-zero PWM frames required before release",
+    )
+    parser.add_argument(
+        "--startup-sync-fbwa-confirmed",
+        action="store_true",
+        help="Direct validation readiness: external harness has confirmed FBWA before startup-sync release",
+    )
+    parser.add_argument(
+        "--startup-sync-ahrs-ekf-type",
+        type=int,
+        default=None,
+        help="Direct validation readiness: loaded AHRS_EKF_TYPE confirmed by external harness",
+    )
     parser.add_argument("--startup-sync-roll-deg", type=float, default=15.0, help="Startup-sync release roll target")
     parser.add_argument("--startup-sync-pitch-deg", type=float, default=-2.0, help="Startup-sync release pitch target")
     parser.add_argument("--startup-sync-yaw-deg", type=float, default=315.0, help="Startup-sync held heading")
@@ -1337,6 +1382,7 @@ class B3PrecontrolHandover:
         channel_map: ActuatorChannelMap,
         host_time: float,
         simulation_timestamp: Optional[float] = None,
+        hold_active_control: bool = False,
     ) -> Tuple[NormalizedActuatorCommand, str]:
         """Return (command_to_send, command_source); may advance the phase once."""
         if not self.enabled:
@@ -1349,9 +1395,12 @@ class B3PrecontrolHandover:
                 and active_pwm_invalid(raw_decoded_command, channel_map) is None
             )
             if required_ok:
+                self.first_valid_pwm_seen = True
+                if hold_active_control:
+                    assert self.reference is not None
+                    return self.reference.as_command(), B3CommandSource.PRECONTROL_REFERENCE
                 self.phase = B3ControlPhase.ACTIVE_CONTROL
                 self.handover_count += 1
-                self.first_valid_pwm_seen = True
                 self._record_transition(host_time, simulation_timestamp, raw_decoded_command.pwm, output_command)
                 return output_command, B3CommandSource.ARDUPLANE_PWM
             assert self.reference is not None
@@ -1398,7 +1447,7 @@ class B3StartupSyncTarget:
             yaw_rad=yaw,
             quaternion=euler_to_quaternion(roll, pitch, yaw),
             gyro_rad_s=(0.0, 0.0, 0.0),
-            accel_body_mss=(0.0, 0.0, -GRAVITY_MSS),
+            accel_body_mss=gravity_body_mss(roll, pitch, yaw),
             velocity_ned_mps=(vn, ve, 0.0),
             airspeed_mps=self.airspeed_mps,
             row_signature=f"startup_sync_hold:{timestamp_s:.9f}",
@@ -1406,14 +1455,27 @@ class B3StartupSyncTarget:
         )
 
 
+@dataclass(frozen=True)
+class B3StartupReadiness:
+    """External readiness facts for SR-75 direct SIM_JSON validation."""
+
+    required_valid_pwm_frames: int = 1
+    fbwa_confirmed: bool = True
+    ahrs_ekf_type: Optional[int] = 10
+    required_ahrs_ekf_type: int = 10
+
+    def __post_init__(self) -> None:
+        if self.required_valid_pwm_frames < 1:
+            raise ValueError("required_valid_pwm_frames must be >= 1")
+
+
 class B3StartupSync:
     """SR-75 Layer 2J-B3C-C2 startup synchronization.
 
-    Before ArduPlane control readiness (valid required-channel PWM, not
-    stale -- the only readiness signal visible over SIM_JSON, used here as a
-    proxy for "FBWA active"), the responder serves a fixed synthetic sensor
-    state matching the intended release condition, so ArduPlane never
-    observes the natural drift that would otherwise occur while it boots.
+    Before direct-topology validation readiness, the responder serves a fixed
+    synthetic sensor state matching the intended release condition, so
+    ArduPlane never observes the natural drift that would otherwise occur
+    while it boots.
 
     JSBSim itself is not paused (empirically, writing attitude/rate
     properties over a second QTJSBSIM input does not hold FGPropagate's
@@ -1425,8 +1487,9 @@ class B3StartupSync:
     physically genuine.
     """
 
-    def __init__(self, target: Optional[B3StartupSyncTarget]):
+    def __init__(self, target: Optional[B3StartupSyncTarget], readiness: Optional[B3StartupReadiness] = None):
         self.target = target
+        self.readiness = B3StartupReadiness() if readiness is None else readiness
         self.phase = B3StartupPhase.STARTUP_SYNC_HOLD if target is not None else B3StartupPhase.RELEASED
         self.release_count = 0
         self.control_ready_record: Optional[Dict[str, object]] = None
@@ -1440,6 +1503,8 @@ class B3StartupSync:
         self._hold_start_mono = time.monotonic()
         self._last_hold_timestamp = 0.0
         self._release_wall_offset = 0.0
+        self._valid_pwm_frames = 0
+        self.readiness_reason = "startup_sync_disabled" if target is None else "waiting_for_valid_pwm"
 
     @property
     def enabled(self) -> bool:
@@ -1448,6 +1513,10 @@ class B3StartupSync:
     @property
     def final_held_timestamp(self) -> Optional[float]:
         return self._last_hold_timestamp if self.enabled else None
+
+    @property
+    def valid_pwm_frames(self) -> int:
+        return self._valid_pwm_frames
 
     def held_reply_state(self, host_time: float) -> SimState:
         """A monotonically-increasing synthetic reply held at the release target."""
@@ -1465,16 +1534,51 @@ class B3StartupSync:
         host_time: float,
         pwm: Sequence[int],
     ) -> None:
-        """Advance HOLD -> RELEASED at most once, on the first valid PWM frame."""
+        """Advance HOLD -> RELEASED once the direct-topology readiness contract is met."""
         if not self.enabled or self.phase == B3StartupPhase.RELEASED:
             return
-        required_ok = (
-            not raw_decoded_command.stale
-            and active_pwm_invalid(raw_decoded_command, channel_map) is None
-        )
-        if not required_ok:
+        invalid_pwm = active_pwm_invalid(raw_decoded_command, channel_map)
+        if raw_decoded_command.stale:
+            self._valid_pwm_frames = 0
+            self.readiness_reason = "waiting_for_stale_zero"
             return
-        self.control_ready_record = {"host_time": host_time, "pwm1_4": tuple(pwm[:4])}
+        if invalid_pwm is not None:
+            self._valid_pwm_frames = 0
+            self.readiness_reason = (
+                "waiting_for_valid_pwm "
+                f"role={invalid_pwm.role} channel={invalid_pwm.channel} pwm={invalid_pwm.pwm}"
+            )
+            return
+        if abs(raw_decoded_command.rato) > 1.0e-9:
+            self._valid_pwm_frames = 0
+            self.readiness_reason = f"waiting_for_rato_zero rato={raw_decoded_command.rato:.9f}"
+            return
+        self._valid_pwm_frames += 1
+        if self._valid_pwm_frames < self.readiness.required_valid_pwm_frames:
+            self.readiness_reason = (
+                "waiting_for_consecutive_valid_pwm "
+                f"{self._valid_pwm_frames}/{self.readiness.required_valid_pwm_frames}"
+            )
+            return
+        if not self.readiness.fbwa_confirmed:
+            self.readiness_reason = "waiting_for_external_fbwa_confirmation"
+            return
+        if self.readiness.ahrs_ekf_type != self.readiness.required_ahrs_ekf_type:
+            self.readiness_reason = (
+                "waiting_for_ahrs_ekf_type "
+                f"loaded={self.readiness.ahrs_ekf_type} required={self.readiness.required_ahrs_ekf_type}"
+            )
+            return
+        self.readiness_reason = (
+            "ready:valid_pwm_frames="
+            f"{self._valid_pwm_frames} stale=0 rato=0 fbwa=1 "
+            f"ahrs_ekf_type={self.readiness.ahrs_ekf_type}"
+        )
+        self.control_ready_record = {
+            "host_time": host_time,
+            "pwm1_4": tuple(pwm[:4]),
+            "reason": self.readiness_reason,
+        }
         self.phase = B3StartupPhase.RELEASED
         self.release_count += 1
         self._release_wall_offset = self._last_hold_timestamp
@@ -1758,7 +1862,12 @@ def main() -> int:
         if args.startup_sync
         else None
     )
-    startup_sync = B3StartupSync(startup_sync_target)
+    startup_readiness = B3StartupReadiness(
+        required_valid_pwm_frames=args.startup_sync_required_valid_pwm_frames,
+        fbwa_confirmed=args.startup_sync_fbwa_confirmed,
+        ahrs_ekf_type=args.startup_sync_ahrs_ekf_type,
+    )
+    startup_sync = B3StartupSync(startup_sync_target, startup_readiness)
     timing_gate = B3TimingQualityGate(args.b3_timing_quality_gate)
 
     print("SR75 SIM_JSON RESPONDER")
@@ -1785,6 +1894,13 @@ def main() -> int:
             "B3 STARTUP_SYNC: enabled "
             f"roll={tgt.roll_deg:.3f} pitch={tgt.pitch_deg:.3f} yaw={tgt.yaw_deg:.3f} "
             f"altitude={tgt.altitude_m:.1f} airspeed={tgt.airspeed_mps:.1f}"
+        )
+        print(
+            "B3 STARTUP_SYNC READINESS: "
+            f"valid_pwm_frames={startup_sync.readiness.required_valid_pwm_frames} "
+            f"fbwa_confirmed={int(startup_sync.readiness.fbwa_confirmed)} "
+            f"ahrs_ekf_type={startup_sync.readiness.ahrs_ekf_type} "
+            f"required_ahrs_ekf_type={startup_sync.readiness.required_ahrs_ekf_type}"
         )
 
     csv_file, log_writer = open_log(args.log_csv)
@@ -1906,12 +2022,14 @@ def main() -> int:
                 )
                 actuator_command = NormalizedActuatorCommand.neutral()
 
+            was_holding = startup_sync.enabled and startup_sync.phase == B3StartupPhase.STARTUP_SYNC_HOLD
             actuator_command, command_source = precontrol.resolve(
                 raw_decoded_command=raw_decoded_command,
                 output_command=actuator_command,
                 channel_map=actuator_channel_map,
                 host_time=started,
                 simulation_timestamp=mapper.last_outgoing_timestamp,
+                hold_active_control=was_holding,
             )
             if precontrol.transition is not None and not precontrol.transition_reported:
                 transition = precontrol.transition
@@ -1931,7 +2049,6 @@ def main() -> int:
                 )
                 precontrol.transition_reported = True
 
-            was_holding = startup_sync.enabled and startup_sync.phase == B3StartupPhase.STARTUP_SYNC_HOLD
             startup_sync.maybe_release(
                 raw_decoded_command=raw_decoded_command,
                 channel_map=actuator_channel_map,
@@ -1949,7 +2066,8 @@ def main() -> int:
                 print(
                     "STARTUP_SYNC_RELEASE "
                     f"control_ready_host_time={ready['host_time']:.9f} "
-                    f"pwm1_4={ready['pwm1_4']}"
+                    f"pwm1_4={ready['pwm1_4']} "
+                    f"readiness_reason='{ready['reason']}'"
                 )
 
             if command_sink is not None:

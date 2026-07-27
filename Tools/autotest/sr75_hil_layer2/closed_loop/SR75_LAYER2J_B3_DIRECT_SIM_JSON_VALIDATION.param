@@ -1,0 +1,8 @@
+# SR-75 Layer 2J-B3 direct SIM_JSON validation overlay.
+# Simulation-validation-only: use only with the software direct JSBSim CSV ->
+# SIM_JSON responder -> ArduPlane SITL topology. Do not use as a general
+# Plane/JSBSim default or hardware configuration.
+
+AHRS_EKF_TYPE 10
+STAB_PITCH_DOWN 0
+RC2_TRIM 1500
