@@ -21,6 +21,40 @@ fi
 
 rm -f "${RESPONDER_LOG}" "${RESPONDER_CSV}" "${PID_FILE}"
 
+PRECONTROL_ARGS=()
+if [[ "${SR75_B3_PRECONTROL_HOLD:-0}" == "1" ]]; then
+    PRECONTROL_ARGS+=(
+        --precontrol-hold
+        --precontrol-elevator "${SR75_B3_PRECONTROL_ELEVATOR:--0.42}"
+        --precontrol-aileron "${SR75_B3_PRECONTROL_AILERON:-0.0}"
+        --precontrol-rudder "${SR75_B3_PRECONTROL_RUDDER:-0.0}"
+        --precontrol-throttle "${SR75_B3_PRECONTROL_THROTTLE:-0.55}"
+        --precontrol-rato "${SR75_B3_PRECONTROL_RATO:-0.0}"
+    )
+fi
+
+STARTUP_SYNC_ARGS=()
+if [[ "${SR75_B3_STARTUP_SYNC:-0}" == "1" ]]; then
+    STARTUP_SYNC_ARGS+=(
+        --startup-sync
+        --startup-sync-roll-deg "${SR75_B3_STARTUP_SYNC_ROLL_DEG:-15.0}"
+        --startup-sync-pitch-deg "${SR75_B3_STARTUP_SYNC_PITCH_DEG:--2.0}"
+        --startup-sync-yaw-deg "${SR75_B3_STARTUP_SYNC_YAW_DEG:-315.0}"
+        --startup-sync-altitude-m "${SR75_B3_STARTUP_SYNC_ALTITUDE_M:-3000.0}"
+        --startup-sync-airspeed-mps "${SR75_B3_STARTUP_SYNC_AIRSPEED_MPS:-69.0}"
+        --startup-sync-latitude-deg "${SR75_B3_STARTUP_SYNC_LATITUDE_DEG:-32.5378085}"
+        --startup-sync-longitude-deg "${SR75_B3_STARTUP_SYNC_LONGITUDE_DEG:-74.3661944}"
+    )
+fi
+
+TIMING_QUALITY_ARGS=()
+if [[ "${SR75_B3_TIMING_QUALITY_GATE:-0}" == "1" ]]; then
+    TIMING_QUALITY_ARGS+=(
+        --b3-timing-quality-gate
+        --b3-timing-quality-abort-row "${RUN_DIR}/sr75_b3_time_discontinuity_abort_${CASE_NAME}.csv"
+    )
+fi
+
 cd "${REPO_ROOT}"
 setsid python3 Tools/autotest/sr75_hil_layer2/sim_json/sr75_sim_json_responder.py \
     --listen-host "${LISTEN_HOST}" \
@@ -42,6 +76,9 @@ setsid python3 Tools/autotest/sr75_hil_layer2/sim_json/sr75_sim_json_responder.p
     --rc3-pwm "${SR75_B3_RC3_PWM:-1300}" \
     --rc4-pwm "${SR75_B3_RC4_PWM:-1500}" \
     --rc7-pwm "${SR75_B3_RC7_PWM:-1000}" \
+    "${PRECONTROL_ARGS[@]}" \
+    "${STARTUP_SYNC_ARGS[@]}" \
+    "${TIMING_QUALITY_ARGS[@]}" \
     >"${RESPONDER_LOG}" 2>&1 < /dev/null &
 echo "$!" > "${PID_FILE}"
 

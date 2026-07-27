@@ -16,7 +16,7 @@ import socket
 import struct
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from sr75_sim_json_actuator_bridge import (
@@ -53,6 +53,14 @@ SERVO32_STRUCT = struct.Struct("<HHI32H")
 LOG_FIELDS = [
     "host_monotonic_time",
     "request_count",
+    "sim_json_request_sequence",
+    "request_received_host_time",
+    "previous_request_received_host_time",
+    "request_host_dt",
+    "pwm_frame_received_host_time",
+    "startup_release_host_time",
+    "reply_send_host_time",
+    "state_csv_source_timestamp",
     "frame_rate",
     "frame_count",
     "source_ip",
@@ -107,6 +115,30 @@ LOG_FIELDS = [
     "jsbsim_throttle_value",
     "jsbsim_rato_property",
     "jsbsim_rato_value",
+    "control_phase",
+    "precontrol_active",
+    "first_valid_pwm_seen",
+    "handover_count",
+    "command_source",
+    "elevator_cmd",
+    "aileron_cmd",
+    "rudder_cmd",
+    "turbojet_throttle_cmd",
+    "rato_cmd",
+    "p_rad_s",
+    "q_rad_s",
+    "r_rad_s",
+    "startup_sync_phase",
+    "control_ready_timestamp",
+    "release_timestamp",
+    "first_post_release_state_timestamp",
+    "scoring_start_timestamp",
+    "timing_host_dt",
+    "timing_source_simulation_dt",
+    "timing_outgoing_simulation_dt",
+    "timing_source_over_host_ratio",
+    "timing_gate_state",
+    "timing_baseline_row",
 ]
 
 
@@ -119,6 +151,16 @@ class StateEnvelopeError(Exception):
 
     def __init__(self, offenders: Sequence[str]):
         self.offenders = tuple(offenders)
+        super().__init__(";".join(self.offenders))
+
+
+class TimeDiscontinuityError(Exception):
+    """Raised when consecutive scoring-window rows fail the B3 timing-quality gate."""
+
+    def __init__(self, offenders: Sequence[str], previous: Dict[str, object], current: Dict[str, object]):
+        self.offenders = tuple(offenders)
+        self.previous = dict(previous)
+        self.current = dict(current)
         super().__init__(";".join(self.offenders))
 
 
@@ -591,11 +633,42 @@ def make_log_row(
     reply_reason: str = "",
     actuator_command: Optional[NormalizedActuatorCommand] = None,
     control_packet: Optional[ControlPacket] = None,
+    command_source: str = "",
+    precontrol: Optional["B3PrecontrolHandover"] = None,
+    startup_sync: Optional["B3StartupSync"] = None,
+    timing_quality: Optional[Tuple[float, float, float, Optional[float]]] = None,
+    timing_gate: Optional["B3TimingQualityGate"] = None,
+    previous_request_received_host_time: Optional[float] = None,
+    request_received_host_time: Optional[float] = None,
+    pwm_frame_received_host_time: Optional[float] = None,
+    reply_send_host_time: Optional[float] = None,
 ) -> Dict[str, object]:
     now = time.monotonic()
+    request_host_dt = (
+        None if previous_request_received_host_time is None
+        else started - previous_request_received_host_time
+    )
+    received_host_time = started if request_received_host_time is None else request_received_host_time
     row: Dict[str, object] = {
         "host_monotonic_time": f"{now:.9f}",
         "request_count": request_count,
+        "sim_json_request_sequence": request_count,
+        "request_received_host_time": f"{received_host_time:.9f}",
+        "previous_request_received_host_time": (
+            "" if previous_request_received_host_time is None
+            else f"{previous_request_received_host_time:.9f}"
+        ),
+        "request_host_dt": "" if request_host_dt is None else f"{request_host_dt:.9f}",
+        "pwm_frame_received_host_time": (
+            "" if pwm_frame_received_host_time is None
+            else f"{pwm_frame_received_host_time:.9f}"
+        ),
+        "startup_release_host_time": (
+            "" if startup_sync is None or startup_sync.release_record is None
+            else f"{startup_sync.release_record['host_time']:.9f}"
+        ),
+        "reply_send_host_time": "" if reply_send_host_time is None else f"{reply_send_host_time:.9f}",
+        "state_csv_source_timestamp": "" if state is None else f"{state.source_timestamp_s:.9f}",
         "frame_rate": "" if control_packet is None else control_packet.frame_rate,
         "frame_count": "" if control_packet is None else control_packet.frame_count,
         "source_ip": source[0],
@@ -614,6 +687,9 @@ def make_log_row(
         "roll": "" if state is None else f"{state.roll_rad:.9f}",
         "pitch": "" if state is None else f"{state.pitch_rad:.9f}",
         "yaw": "" if state is None else f"{state.yaw_rad:.9f}",
+        "p_rad_s": "" if state is None else f"{state.gyro_rad_s[0]:.9f}",
+        "q_rad_s": "" if state is None else f"{state.gyro_rad_s[1]:.9f}",
+        "r_rad_s": "" if state is None else f"{state.gyro_rad_s[2]:.9f}",
         "vn": "" if state is None else f"{state.velocity_ned_mps[0]:.6f}",
         "ve": "" if state is None else f"{state.velocity_ned_mps[1]:.6f}",
         "vd": "" if state is None else f"{state.velocity_ned_mps[2]:.6f}",
@@ -624,9 +700,66 @@ def make_log_row(
     }
     if actuator_command is not None:
         row.update(actuator_command.log_fields())
+        row["elevator_cmd"] = f"{actuator_command.elevator:.6f}"
+        row["aileron_cmd"] = f"{actuator_command.aileron:.6f}"
+        row["rudder_cmd"] = f"{actuator_command.rudder:.6f}"
+        row["turbojet_throttle_cmd"] = f"{actuator_command.turbojet_throttle:.6f}"
+        row["rato_cmd"] = f"{actuator_command.rato:.6f}"
     if control_packet is not None:
         for index, pwm in enumerate(control_packet.pwm[:8], start=1):
             row[f"pwm{index}"] = pwm
+    row["command_source"] = command_source
+    if precontrol is not None:
+        row["control_phase"] = precontrol.phase
+        row["precontrol_active"] = int(precontrol.enabled)
+        row["first_valid_pwm_seen"] = int(precontrol.first_valid_pwm_seen)
+        row["handover_count"] = precontrol.handover_count
+    else:
+        row["control_phase"] = ""
+        row["precontrol_active"] = 0
+        row["first_valid_pwm_seen"] = ""
+        row["handover_count"] = 0
+    if startup_sync is not None:
+        row["startup_sync_phase"] = startup_sync.phase
+        row["control_ready_timestamp"] = (
+            "" if startup_sync.control_ready_record is None
+            else f"{startup_sync.control_ready_record['host_time']:.9f}"
+        )
+        row["release_timestamp"] = (
+            "" if startup_sync.release_record is None
+            else f"{startup_sync.release_record['host_time']:.9f}"
+        )
+        row["first_post_release_state_timestamp"] = (
+            "" if startup_sync.first_post_release_state_record is None
+            else f"{startup_sync.first_post_release_state_record['simulation_timestamp']:.9f}"
+        )
+        row["scoring_start_timestamp"] = (
+            "" if startup_sync.scoring_start_record is None
+            else f"{startup_sync.scoring_start_record['simulation_timestamp']:.9f}"
+        )
+    else:
+        row["startup_sync_phase"] = ""
+        row["control_ready_timestamp"] = ""
+        row["release_timestamp"] = ""
+        row["first_post_release_state_timestamp"] = ""
+        row["scoring_start_timestamp"] = ""
+    if timing_quality is not None:
+        host_dt, source_dt, outgoing_dt, ratio = timing_quality
+        row["timing_host_dt"] = f"{host_dt:.9f}"
+        row["timing_source_simulation_dt"] = f"{source_dt:.9f}"
+        row["timing_outgoing_simulation_dt"] = f"{outgoing_dt:.9f}"
+        row["timing_source_over_host_ratio"] = "" if ratio is None else f"{ratio:.6f}"
+    else:
+        row["timing_host_dt"] = ""
+        row["timing_source_simulation_dt"] = ""
+        row["timing_outgoing_simulation_dt"] = ""
+        row["timing_source_over_host_ratio"] = ""
+    if timing_gate is not None:
+        row["timing_gate_state"] = timing_gate.state
+        row["timing_baseline_row"] = timing_gate.baseline_label_for_request(request_count)
+    else:
+        row["timing_gate_state"] = ""
+        row["timing_baseline_row"] = ""
     return row
 
 
@@ -725,6 +858,203 @@ def write_b3_state_envelope_abort(path: Optional[str], state: SimState, offender
         writer.writerow(row)
 
 
+B3_TIME_DISCONTINUITY_LIMITS = {
+    "source_simulation_dt_max_s": 0.05,
+    "outgoing_simulation_dt_max_s": 0.05,
+    "source_over_host_ratio_max": 3.0,
+}
+
+
+def b3_time_discontinuity_offenders(
+    host_dt: float, source_simulation_dt: float, outgoing_simulation_dt: float
+) -> Tuple[str, ...]:
+    offenders = []
+    if host_dt <= 0.0:
+        offenders.append(f"host_dt={host_dt:.9f}<=0")
+    if source_simulation_dt <= 0.0:
+        offenders.append(f"source_simulation_dt={source_simulation_dt:.9f}<=0")
+    source_max = B3_TIME_DISCONTINUITY_LIMITS["source_simulation_dt_max_s"]
+    if source_simulation_dt > source_max:
+        offenders.append(f"source_simulation_dt={source_simulation_dt:.9f}>{source_max}")
+    if outgoing_simulation_dt <= 0.0:
+        offenders.append(f"outgoing_simulation_dt={outgoing_simulation_dt:.9f}<=0")
+    outgoing_max = B3_TIME_DISCONTINUITY_LIMITS["outgoing_simulation_dt_max_s"]
+    if outgoing_simulation_dt > outgoing_max:
+        offenders.append(f"outgoing_simulation_dt={outgoing_simulation_dt:.9f}>{outgoing_max}")
+    if host_dt > 0.0:
+        ratio = source_simulation_dt / host_dt
+        ratio_max = B3_TIME_DISCONTINUITY_LIMITS["source_over_host_ratio_max"]
+        if ratio > ratio_max:
+            offenders.append(f"source_simulation_dt/host_dt={ratio:.6f}>{ratio_max}")
+    return tuple(offenders)
+
+
+class B3TimingQualityGate:
+    """SR-75 Layer 2J-B3C-C3 scoring-window timing-quality gate.
+
+    The startup-sync handoff is phase-aware: held synthetic rows are not
+    compared against the first real post-release row. On release, the gate
+    enters WAIT_FIRST_REAL_ROW; that first real row is labeled
+    TIMING_BASELINE, then later real rows are checked pairwise.
+
+    Scoring-start uses option A from the B3C-C3A request: continue the
+    already-active real-row sequence. The first real post-release row is the
+    timing baseline, so the second real row can both become scoring_start and
+    be protected by the same cadence gate.
+    """
+
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+        self.state = B3TimingGateState.ACTIVE if enabled else B3TimingGateState.INACTIVE
+        self.previous: Optional[Dict[str, object]] = None
+        self.final_held_outgoing_timestamp: Optional[float] = None
+        self.release_count: Optional[int] = None
+        self.release_host_time: Optional[float] = None
+        self.last_baseline_request_count: Optional[int] = None
+
+    def on_startup_sync_release(
+        self,
+        final_held_outgoing_timestamp: Optional[float],
+        release_host_time: float,
+        release_count: int,
+    ) -> None:
+        """Reset checked timestamps at STARTUP_SYNC_RELEASE."""
+        if not self.enabled:
+            return
+        self.previous = None
+        self.final_held_outgoing_timestamp = final_held_outgoing_timestamp
+        self.release_host_time = release_host_time
+        self.release_count = release_count
+        self.last_baseline_request_count = None
+        self.state = B3TimingGateState.WAIT_FIRST_REAL_ROW
+
+    def baseline_label_for_request(self, request_count: int) -> str:
+        if not self.enabled:
+            return ""
+        return "TIMING_BASELINE" if self.last_baseline_request_count == request_count else ""
+
+    def _release_boundary_offenders(
+        self,
+        source_simulation_timestamp: float,
+        outgoing_simulation_timestamp: float,
+    ) -> Tuple[str, ...]:
+        offenders = []
+        if not math.isfinite(source_simulation_timestamp):
+            offenders.append(f"source_simulation_timestamp=nonfinite:{source_simulation_timestamp}")
+        if not math.isfinite(outgoing_simulation_timestamp):
+            offenders.append(f"outgoing_simulation_timestamp=nonfinite:{outgoing_simulation_timestamp}")
+        if self.release_count != 1:
+            offenders.append(f"startup_sync_release_count={self.release_count}:expected1")
+        if (
+            self.final_held_outgoing_timestamp is not None
+            and math.isfinite(outgoing_simulation_timestamp)
+            and outgoing_simulation_timestamp <= self.final_held_outgoing_timestamp
+        ):
+            offenders.append(
+                "release_outgoing_timestamp="
+                f"{outgoing_simulation_timestamp:.9f}"
+                f"<=final_held_timestamp={self.final_held_outgoing_timestamp:.9f}"
+            )
+        return tuple(offenders)
+
+    def check(
+        self,
+        request_count: int,
+        host_time: float,
+        source_simulation_timestamp: float,
+        outgoing_simulation_timestamp: float,
+    ) -> Optional[Tuple[float, float, float, Optional[float]]]:
+        """Return (host_dt, source_dt, outgoing_dt, ratio) for logging, or None
+        if disabled or this is the first tracked row (nothing to compare yet).
+        Raises TimeDiscontinuityError if any offending condition is met.
+        """
+        if not self.enabled:
+            return None
+        current = {
+            "request_count": request_count,
+            "host_time": host_time,
+            "source_simulation_timestamp": source_simulation_timestamp,
+            "outgoing_simulation_timestamp": outgoing_simulation_timestamp,
+        }
+        if self.state == B3TimingGateState.WAIT_FIRST_REAL_ROW:
+            offenders = self._release_boundary_offenders(
+                source_simulation_timestamp=source_simulation_timestamp,
+                outgoing_simulation_timestamp=outgoing_simulation_timestamp,
+            )
+            if offenders:
+                raise TimeDiscontinuityError(
+                    offenders,
+                    {
+                        "request_count": "STARTUP_SYNC_RELEASE",
+                        "host_time": self.release_host_time if self.release_host_time is not None else host_time,
+                        "source_simulation_timestamp": "",
+                        "outgoing_simulation_timestamp": (
+                            "" if self.final_held_outgoing_timestamp is None
+                            else self.final_held_outgoing_timestamp
+                        ),
+                    },
+                    current,
+                )
+            self.previous = current
+            self.last_baseline_request_count = request_count
+            self.state = B3TimingGateState.ACTIVE
+            return None
+        previous = self.previous
+        self.previous = current
+        if previous is None:
+            self.last_baseline_request_count = request_count
+            return None
+        self.last_baseline_request_count = None
+        host_dt = current["host_time"] - previous["host_time"]
+        source_dt = current["source_simulation_timestamp"] - previous["source_simulation_timestamp"]
+        outgoing_dt = current["outgoing_simulation_timestamp"] - previous["outgoing_simulation_timestamp"]
+        ratio = (source_dt / host_dt) if host_dt > 0.0 else None
+        offenders = b3_time_discontinuity_offenders(host_dt, source_dt, outgoing_dt)
+        if offenders:
+            raise TimeDiscontinuityError(offenders, previous, current)
+        return (host_dt, source_dt, outgoing_dt, ratio)
+
+
+class B3TimingGateState:
+    """SR-75 B3 timing-quality gate phase names."""
+
+    INACTIVE = "INACTIVE"
+    WAIT_FIRST_REAL_ROW = "WAIT_FIRST_REAL_ROW"
+    ACTIVE = "ACTIVE"
+
+
+def write_b3_time_discontinuity_abort(
+    path: Optional[str],
+    offenders: Sequence[str],
+    previous: Dict[str, object],
+    current: Dict[str, object],
+) -> None:
+    if not path:
+        return
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    def format_timestamp(value: object) -> object:
+        return f"{value:.9f}" if isinstance(value, float) else value
+
+    row = {
+        "previous_request_count": previous["request_count"],
+        "previous_host_time": format_timestamp(previous["host_time"]),
+        "previous_source_simulation_timestamp": format_timestamp(previous["source_simulation_timestamp"]),
+        "previous_outgoing_simulation_timestamp": format_timestamp(previous["outgoing_simulation_timestamp"]),
+        "current_request_count": current["request_count"],
+        "current_host_time": format_timestamp(current["host_time"]),
+        "current_source_simulation_timestamp": format_timestamp(current["source_simulation_timestamp"]),
+        "current_outgoing_simulation_timestamp": format_timestamp(current["outgoing_simulation_timestamp"]),
+        "offenders": ";".join(offenders),
+    }
+    with open(path, "w", newline="", encoding="utf-8") as abort_file:
+        writer = csv.DictWriter(abort_file, fieldnames=list(row))
+        writer.writeheader()
+        writer.writerow(row)
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SR-75 host-side SIM_JSON UDP responder")
     parser.add_argument("--listen-host", default="0.0.0.0")
@@ -763,6 +1093,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="/tmp/sr75_b3/b3_state_envelope_abort.csv",
         help="CSV path for the offending source row when --b3-state-envelope-guard aborts",
     )
+    parser.add_argument(
+        "--b3-timing-quality-gate",
+        action="store_true",
+        help=(
+            "Enable SR-75 B3 scoring-window timing-quality abort: checks host_dt, "
+            "source_simulation_dt, outgoing_simulation_dt, and their ratio between "
+            "consecutive real (non-held) state rows."
+        ),
+    )
+    parser.add_argument(
+        "--b3-timing-quality-abort-row",
+        default="/tmp/sr75_b3/b3_time_discontinuity_abort.csv",
+        help="CSV path for previous/current row timestamps when --b3-timing-quality-gate aborts",
+    )
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--mock-state", action="store_true")
     parser.add_argument("--strict", action="store_true")
@@ -792,6 +1136,45 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--invalid-active-pwm-neutral",
         action="store_true",
         help="Treat out-of-range PWM on mapped actuator channels as a neutral software command",
+    )
+    parser.add_argument(
+        "--precontrol-hold",
+        action="store_true",
+        help=(
+            "SR-75 B3 only: hold a fixed bounded command reference (see --precontrol-*) until "
+            "ArduPlane's first valid required-channel (CH1-CH4) PWM frame, instead of the generic "
+            "stale/neutral failsafe. Does not change behavior unless this flag is passed."
+        ),
+    )
+    parser.add_argument("--precontrol-elevator", type=float, default=-0.42, help="Pre-control hold elevator command")
+    parser.add_argument("--precontrol-aileron", type=float, default=0.0, help="Pre-control hold aileron command")
+    parser.add_argument("--precontrol-rudder", type=float, default=0.0, help="Pre-control hold rudder command")
+    parser.add_argument(
+        "--precontrol-throttle", type=float, default=0.55, help="Pre-control hold turbojet throttle command"
+    )
+    parser.add_argument("--precontrol-rato", type=float, default=0.0, help="Pre-control hold RATO throttle command")
+    parser.add_argument(
+        "--startup-sync",
+        action="store_true",
+        help=(
+            "SR-75 B3 only: serve a fixed synthetic sensor state matching the intended release "
+            "condition (see --startup-sync-*) until ArduPlane's first valid required-channel PWM "
+            "frame, then release with a one-time attitude bias locking that first sample to the "
+            "requested roll/pitch. Does not change behavior unless this flag is passed."
+        ),
+    )
+    parser.add_argument("--startup-sync-roll-deg", type=float, default=15.0, help="Startup-sync release roll target")
+    parser.add_argument("--startup-sync-pitch-deg", type=float, default=-2.0, help="Startup-sync release pitch target")
+    parser.add_argument("--startup-sync-yaw-deg", type=float, default=315.0, help="Startup-sync held heading")
+    parser.add_argument("--startup-sync-altitude-m", type=float, default=3000.0, help="Startup-sync held altitude")
+    parser.add_argument(
+        "--startup-sync-airspeed-mps", type=float, default=69.0, help="Startup-sync held true airspeed"
+    )
+    parser.add_argument(
+        "--startup-sync-latitude-deg", type=float, default=32.5378085, help="Startup-sync held latitude"
+    )
+    parser.add_argument(
+        "--startup-sync-longitude-deg", type=float, default=74.3661944, help="Startup-sync held longitude"
     )
     return parser
 
@@ -860,6 +1243,317 @@ def active_pwm_invalid(command: NormalizedActuatorCommand, channel_map: Actuator
         if pwm < 800 or pwm > 2200:
             return InvalidActivePWM(role=role, channel=channel, pwm=pwm, reason="out_of_range")
     return None
+
+
+class B3ControlPhase:
+    """SR-75 Layer 2J-B3C-C1 responder control phase names."""
+
+    PRECONTROL_HOLD = "PRECONTROL_HOLD"
+    ACTIVE_CONTROL = "ACTIVE_CONTROL"
+
+
+class B3CommandSource:
+    """SR-75 Layer 2J-B3C-C1 command-source labels for logging."""
+
+    PRECONTROL_REFERENCE = "PRECONTROL_REFERENCE"
+    ARDUPLANE_PWM = "ARDUPLANE_PWM"
+    ACTIVE_STALE_FAILSAFE = "ACTIVE_STALE_FAILSAFE"
+
+
+@dataclass(frozen=True)
+class B3PrecontrolReference:
+    """The fixed bounded command reference held before ArduPlane takes over."""
+
+    elevator: float = -0.42
+    aileron: float = 0.0
+    rudder: float = 0.0
+    turbojet_throttle: float = 0.55
+    rato: float = 0.0
+
+    def as_command(self) -> NormalizedActuatorCommand:
+        return NormalizedActuatorCommand(
+            pwm=(),
+            left_elevon=0.0,
+            right_elevon=0.0,
+            elevator=self.elevator,
+            aileron=self.aileron,
+            rudder=self.rudder,
+            throttle_left=self.turbojet_throttle,
+            throttle_right=self.turbojet_throttle,
+            turbojet_throttle=self.turbojet_throttle,
+            rato=self.rato,
+            stale=False,
+        )
+
+
+class B3PrecontrolHandover:
+    """SR-75 Layer 2J-B3C-C1 pre-control hold / active-control handover.
+
+    Before ArduPlane produces its first valid required-channel PWM frame,
+    the responder holds the fixed bounded command reference so the JSBSim
+    trim is not overwritten by the generic stale/neutral failsafe during
+    ArduPlane's startup delay. Once CH1-CH4 are valid, control hands over to
+    ArduPlane's decoded PWM permanently; the reference is never resumed.
+    """
+
+    def __init__(self, reference: Optional[B3PrecontrolReference]):
+        self.reference = reference
+        self.phase = B3ControlPhase.PRECONTROL_HOLD if reference is not None else B3ControlPhase.ACTIVE_CONTROL
+        self.first_valid_pwm_seen = False
+        self.handover_count = 0
+        self.transition: Optional[Dict[str, object]] = None
+        self.transition_reported = False
+
+    @property
+    def enabled(self) -> bool:
+        return self.reference is not None
+
+    def _record_transition(
+        self,
+        host_time: float,
+        simulation_timestamp: Optional[float],
+        pwm: Sequence[int],
+        first_active_command: NormalizedActuatorCommand,
+    ) -> None:
+        assert self.reference is not None
+        self.transition = {
+            "host_time": host_time,
+            "simulation_timestamp": simulation_timestamp,
+            "pwm1_4": tuple(pwm[:4]),
+            "precontrol_command": self.reference,
+            "first_active_command": first_active_command,
+        }
+
+    def resolve(
+        self,
+        raw_decoded_command: NormalizedActuatorCommand,
+        output_command: NormalizedActuatorCommand,
+        channel_map: ActuatorChannelMap,
+        host_time: float,
+        simulation_timestamp: Optional[float] = None,
+    ) -> Tuple[NormalizedActuatorCommand, str]:
+        """Return (command_to_send, command_source); may advance the phase once."""
+        if not self.enabled:
+            source = B3CommandSource.ACTIVE_STALE_FAILSAFE if output_command.stale else B3CommandSource.ARDUPLANE_PWM
+            return output_command, source
+
+        if self.phase == B3ControlPhase.PRECONTROL_HOLD:
+            required_ok = (
+                not raw_decoded_command.stale
+                and active_pwm_invalid(raw_decoded_command, channel_map) is None
+            )
+            if required_ok:
+                self.phase = B3ControlPhase.ACTIVE_CONTROL
+                self.handover_count += 1
+                self.first_valid_pwm_seen = True
+                self._record_transition(host_time, simulation_timestamp, raw_decoded_command.pwm, output_command)
+                return output_command, B3CommandSource.ARDUPLANE_PWM
+            assert self.reference is not None
+            return self.reference.as_command(), B3CommandSource.PRECONTROL_REFERENCE
+
+        # ACTIVE_CONTROL: never fall back to the pre-control reference again.
+        source = B3CommandSource.ACTIVE_STALE_FAILSAFE if output_command.stale else B3CommandSource.ARDUPLANE_PWM
+        return output_command, source
+
+
+class B3StartupPhase:
+    """SR-75 Layer 2J-B3C-C2 startup-synchronization phase names."""
+
+    STARTUP_SYNC_HOLD = "STARTUP_SYNC_HOLD"
+    RELEASED = "RELEASED"
+
+
+@dataclass(frozen=True)
+class B3StartupSyncTarget:
+    """The intended release initial condition, held during STARTUP_SYNC_HOLD."""
+
+    roll_deg: float = 15.0
+    pitch_deg: float = -2.0
+    yaw_deg: float = 315.0
+    altitude_m: float = 3000.0
+    airspeed_mps: float = 69.0
+    latitude_deg: float = 32.5378085
+    longitude_deg: float = 74.3661944
+
+    def held_state(self, timestamp_s: float) -> SimState:
+        roll = degrees_to_radians(self.roll_deg)
+        pitch = degrees_to_radians(self.pitch_deg)
+        yaw = degrees_to_radians(self.yaw_deg)
+        vn = self.airspeed_mps * math.cos(yaw)
+        ve = self.airspeed_mps * math.sin(yaw)
+        return SimState(
+            timestamp_s=timestamp_s,
+            source_timestamp_s=timestamp_s,
+            latitude_deg=self.latitude_deg,
+            longitude_deg=self.longitude_deg,
+            altitude_m=self.altitude_m,
+            roll_rad=roll,
+            pitch_rad=pitch,
+            yaw_rad=yaw,
+            quaternion=euler_to_quaternion(roll, pitch, yaw),
+            gyro_rad_s=(0.0, 0.0, 0.0),
+            accel_body_mss=(0.0, 0.0, -GRAVITY_MSS),
+            velocity_ned_mps=(vn, ve, 0.0),
+            airspeed_mps=self.airspeed_mps,
+            row_signature=f"startup_sync_hold:{timestamp_s:.9f}",
+            row_monotonic_time=time.monotonic(),
+        )
+
+
+class B3StartupSync:
+    """SR-75 Layer 2J-B3C-C2 startup synchronization.
+
+    Before ArduPlane control readiness (valid required-channel PWM, not
+    stale -- the only readiness signal visible over SIM_JSON, used here as a
+    proxy for "FBWA active"), the responder serves a fixed synthetic sensor
+    state matching the intended release condition, so ArduPlane never
+    observes the natural drift that would otherwise occur while it boots.
+
+    JSBSim itself is not paused (empirically, writing attitude/rate
+    properties over a second QTJSBSIM input does not hold FGPropagate's
+    integrator -- the values are silently overwritten every frame). Instead,
+    at the release instant a one-time attitude bias is computed from
+    (target - actual JSBSim roll/pitch) and applied to every subsequent real
+    JSBSim row, so the first released sample exactly matches the requested
+    initial condition while all later relative motion (rates, changes) stays
+    physically genuine.
+    """
+
+    def __init__(self, target: Optional[B3StartupSyncTarget]):
+        self.target = target
+        self.phase = B3StartupPhase.STARTUP_SYNC_HOLD if target is not None else B3StartupPhase.RELEASED
+        self.release_count = 0
+        self.control_ready_record: Optional[Dict[str, object]] = None
+        self.release_record: Optional[Dict[str, object]] = None
+        self.first_post_release_state_record: Optional[Dict[str, object]] = None
+        self.scoring_start_record: Optional[Dict[str, object]] = None
+        self._roll_bias_rad = 0.0
+        self._pitch_bias_rad = 0.0
+        self._bias_locked = False
+        self._fresh_rows_since_release = 0
+        self._hold_start_mono = time.monotonic()
+        self._last_hold_timestamp = 0.0
+        self._release_wall_offset = 0.0
+
+    @property
+    def enabled(self) -> bool:
+        return self.target is not None
+
+    @property
+    def final_held_timestamp(self) -> Optional[float]:
+        return self._last_hold_timestamp if self.enabled else None
+
+    def held_reply_state(self, host_time: float) -> SimState:
+        """A monotonically-increasing synthetic reply held at the release target."""
+        assert self.target is not None
+        timestamp_s = max(MIN_OUTGOING_TIMESTAMP_STEP_S, host_time - self._hold_start_mono)
+        if timestamp_s <= self._last_hold_timestamp:
+            timestamp_s = self._last_hold_timestamp + MIN_OUTGOING_TIMESTAMP_STEP_S
+        self._last_hold_timestamp = timestamp_s
+        return self.target.held_state(timestamp_s)
+
+    def maybe_release(
+        self,
+        raw_decoded_command: NormalizedActuatorCommand,
+        channel_map: ActuatorChannelMap,
+        host_time: float,
+        pwm: Sequence[int],
+    ) -> None:
+        """Advance HOLD -> RELEASED at most once, on the first valid PWM frame."""
+        if not self.enabled or self.phase == B3StartupPhase.RELEASED:
+            return
+        required_ok = (
+            not raw_decoded_command.stale
+            and active_pwm_invalid(raw_decoded_command, channel_map) is None
+        )
+        if not required_ok:
+            return
+        self.control_ready_record = {"host_time": host_time, "pwm1_4": tuple(pwm[:4])}
+        self.phase = B3StartupPhase.RELEASED
+        self.release_count += 1
+        self._release_wall_offset = self._last_hold_timestamp
+        self.release_record = {"host_time": host_time}
+
+    def _bounds_ok(
+        self,
+        state: SimState,
+        raw_decoded_command: NormalizedActuatorCommand,
+        channel_map: Optional[ActuatorChannelMap],
+    ) -> bool:
+        """Item-3 scoring_start bounds: roll/pitch/rates/PWM-valid/RATO=0."""
+        assert self.target is not None
+        roll_deg = radians_to_degrees(state.roll_rad)
+        pitch_deg = radians_to_degrees(state.pitch_rad)
+        if abs(roll_deg - self.target.roll_deg) > 2.0:
+            return False
+        if abs(pitch_deg - self.target.pitch_deg) > 2.0:
+            return False
+        if max(abs(v) for v in state.gyro_rad_s) >= 0.2:
+            return False
+        if raw_decoded_command.stale:
+            return False
+        if channel_map is not None and active_pwm_invalid(raw_decoded_command, channel_map) is not None:
+            return False
+        if abs(raw_decoded_command.rato) > 1.0e-9:
+            return False
+        return True
+
+    def process_post_release_state(
+        self,
+        state: SimState,
+        raw_decoded_command: Optional[NormalizedActuatorCommand] = None,
+        channel_map: Optional[ActuatorChannelMap] = None,
+    ) -> SimState:
+        """Apply the one-time attitude bias, rebase the timestamp, track scoring readiness.
+
+        The outgoing timestamp continues monotonically from wherever the held
+        sequence left off: StateMapper rebases the first accepted post-release
+        row to approximately zero, so adding the recorded hold-phase offset
+        here keeps the full outgoing sequence strictly increasing across the
+        hold -> release boundary, with no backward jump.
+
+        scoring_start is recorded once at least two fresh (non-reused) rows
+        have been seen since release AND this row itself satisfies the full
+        item-3 bounds (roll/pitch/rates/PWM-valid/RATO=0) -- discarding rows
+        that only satisfy the row-count requirement but not the state bounds.
+        """
+        assert self.target is not None
+        state = replace(state)
+        state.timestamp_s += self._release_wall_offset
+        if not self._bias_locked:
+            self._roll_bias_rad = degrees_to_radians(self.target.roll_deg) - state.roll_rad
+            self._pitch_bias_rad = degrees_to_radians(self.target.pitch_deg) - state.pitch_rad
+            self._bias_locked = True
+            self.first_post_release_state_record = {"simulation_timestamp": state.timestamp_s}
+
+        if not state.reused_source_row:
+            self._fresh_rows_since_release += 1
+
+        state.roll_rad += self._roll_bias_rad
+        state.pitch_rad += self._pitch_bias_rad
+        state.quaternion = euler_to_quaternion(state.roll_rad, state.pitch_rad, state.yaw_rad)
+
+        if (
+            self.scoring_start_record is None
+            and self._fresh_rows_since_release >= 2
+            and raw_decoded_command is not None
+            and self._bounds_ok(state, raw_decoded_command, channel_map)
+        ):
+            self.scoring_start_record = {"simulation_timestamp": state.timestamp_s}
+        return state
+
+    def scoring_eligible(
+        self,
+        state: SimState,
+        raw_decoded_command: NormalizedActuatorCommand,
+        channel_map: Optional[ActuatorChannelMap] = None,
+    ) -> bool:
+        """True once item-3 scoring_start conditions hold for this row."""
+        if self.scoring_start_record is None:
+            return False
+        if state.timestamp_s < self.scoring_start_record["simulation_timestamp"]:
+            return False
+        return self._bounds_ok(state, raw_decoded_command, channel_map)
 
 
 def jsbsim_command_from_actuator(
@@ -942,6 +1636,35 @@ def main() -> int:
             print(f"ERROR: JSBSim command target invalid: {exc}", file=sys.stderr)
             return 2
 
+    precontrol_reference = (
+        B3PrecontrolReference(
+            elevator=args.precontrol_elevator,
+            aileron=args.precontrol_aileron,
+            rudder=args.precontrol_rudder,
+            turbojet_throttle=args.precontrol_throttle,
+            rato=args.precontrol_rato,
+        )
+        if args.precontrol_hold
+        else None
+    )
+    precontrol = B3PrecontrolHandover(precontrol_reference)
+
+    startup_sync_target = (
+        B3StartupSyncTarget(
+            roll_deg=args.startup_sync_roll_deg,
+            pitch_deg=args.startup_sync_pitch_deg,
+            yaw_deg=args.startup_sync_yaw_deg,
+            altitude_m=args.startup_sync_altitude_m,
+            airspeed_mps=args.startup_sync_airspeed_mps,
+            latitude_deg=args.startup_sync_latitude_deg,
+            longitude_deg=args.startup_sync_longitude_deg,
+        )
+        if args.startup_sync
+        else None
+    )
+    startup_sync = B3StartupSync(startup_sync_target)
+    timing_gate = B3TimingQualityGate(args.b3_timing_quality_gate)
+
     print("SR75 SIM_JSON RESPONDER")
     if command_sink is None:
         print("ACTUATOR OUTPUT: DISABLED")
@@ -953,6 +1676,20 @@ def main() -> int:
     print(f"ACTUATOR DECODE: {mode} {describe_channel_map(actuator_channel_map)}")
     if rc_pwm is not None:
         print(f"SIM_JSON RC INPUT: {','.join(str(value) for value in rc_pwm)}")
+    if precontrol.enabled:
+        ref = precontrol_reference
+        print(
+            "B3 PRECONTROL_HOLD: enabled "
+            f"elevator={ref.elevator:.3f} aileron={ref.aileron:.3f} rudder={ref.rudder:.3f} "
+            f"throttle={ref.turbojet_throttle:.3f} rato={ref.rato:.3f}"
+        )
+    if startup_sync.enabled:
+        tgt = startup_sync_target
+        print(
+            "B3 STARTUP_SYNC: enabled "
+            f"roll={tgt.roll_deg:.3f} pitch={tgt.pitch_deg:.3f} yaw={tgt.yaw_deg:.3f} "
+            f"altitude={tgt.altitude_m:.1f} airspeed={tgt.airspeed_mps:.1f}"
+        )
 
     csv_file, log_writer = open_log(args.log_csv)
     reader = LatestCSVReader(args.state_file)
@@ -962,6 +1699,7 @@ def main() -> int:
     min_interval = 1.0 / args.rate_limit_hz if args.rate_limit_hz and args.rate_limit_hz > 0.0 else 0.0
     last_reply_mono = 0.0
     request_count = 0
+    previous_request_received_host_time: Optional[float] = None
     saved_first_request = False
     saved_first_reply = False
 
@@ -986,13 +1724,29 @@ def main() -> int:
                 data, source = sock.recvfrom(4096)
             except socket.timeout:
                 if command_sink is not None:
-                    actuator_command = actuator_bridge.current_command(started)
-                    if actuator_command.stale:
-                        sent = command_sink.send_stale_once(timestamp_s=started)
-                        if args.verbose and sent is not None:
-                            print("JSBSIM_COMMAND stale=1 elev=0.000 ail=0.000 rud=0.000 thr=0.000 rato=0.000")
+                    if precontrol.enabled and precontrol.phase == B3ControlPhase.PRECONTROL_HOLD:
+                        assert precontrol_reference is not None
+                        command_sink.send(
+                            jsbsim_command_from_actuator(precontrol_reference.as_command(), timestamp_s=started)
+                        )
+                        if args.verbose:
+                            print(
+                                "JSBSIM_COMMAND PRECONTROL_REFERENCE "
+                                f"elev={precontrol_reference.elevator:.3f} ail={precontrol_reference.aileron:.3f} "
+                                f"rud={precontrol_reference.rudder:.3f} thr={precontrol_reference.turbojet_throttle:.3f} "
+                                f"rato={precontrol_reference.rato:.3f}"
+                            )
+                    else:
+                        actuator_command = actuator_bridge.current_command(started)
+                        if actuator_command.stale:
+                            sent = command_sink.send_stale_once(timestamp_s=started)
+                            if args.verbose and sent is not None:
+                                print("JSBSIM_COMMAND stale=1 elev=0.000 ail=0.000 rud=0.000 thr=0.000 rato=0.000")
                 continue
             request_count += 1
+            request_received_host_time = started
+            request_previous_host_time = previous_request_received_host_time
+            previous_request_received_host_time = request_received_host_time
             if args.save_first_request and not saved_first_request:
                 with open(args.save_first_request, "wb") as request_file:
                     request_file.write(data)
@@ -1004,6 +1758,13 @@ def main() -> int:
             except ValueError as exc:
                 reason = f"MALFORMED_PACKET: {exc}"
                 print(reason)
+                malformed_command_source = ""
+                if command_sink is not None and precontrol.enabled and precontrol.phase == B3ControlPhase.PRECONTROL_HOLD:
+                    assert precontrol_reference is not None
+                    command_sink.send(
+                        jsbsim_command_from_actuator(precontrol_reference.as_command(), timestamp_s=started)
+                    )
+                    malformed_command_source = B3CommandSource.PRECONTROL_REFERENCE
                 write_log(
                     log_writer,
                     csv_file,
@@ -1014,6 +1775,12 @@ def main() -> int:
                         started=started,
                         error_reason=reason,
                         reply_reason=reason,
+                        command_source=malformed_command_source,
+                        precontrol=precontrol,
+                        startup_sync=startup_sync,
+                        timing_gate=timing_gate,
+                        previous_request_received_host_time=request_previous_host_time,
+                        request_received_host_time=request_received_host_time,
                     ),
                 )
                 if args.once:
@@ -1027,6 +1794,7 @@ def main() -> int:
                 actuator_reason = f"ACTUATOR_MAP_ERROR: {exc}"
                 print(actuator_reason)
                 actuator_command = actuator_bridge.current_command(started)
+            raw_decoded_command = actuator_command
             invalid_pwm = active_pwm_invalid(actuator_command, actuator_channel_map)
             if args.invalid_active_pwm_neutral and invalid_pwm is not None:
                 actuator_reason = (
@@ -1041,12 +1809,59 @@ def main() -> int:
                 )
                 actuator_command = NormalizedActuatorCommand.neutral()
 
+            actuator_command, command_source = precontrol.resolve(
+                raw_decoded_command=raw_decoded_command,
+                output_command=actuator_command,
+                channel_map=actuator_channel_map,
+                host_time=started,
+                simulation_timestamp=mapper.last_outgoing_timestamp,
+            )
+            if precontrol.transition is not None and not precontrol.transition_reported:
+                transition = precontrol.transition
+                pre_cmd = transition["precontrol_command"]
+                active_cmd = transition["first_active_command"]
+                print(
+                    "PRECONTROL_TO_ACTIVE "
+                    f"host_time={transition['host_time']:.9f} "
+                    f"simulation_timestamp={transition['simulation_timestamp']} "
+                    f"pwm1_4={transition['pwm1_4']} "
+                    f"precontrol_elev={pre_cmd.elevator:.3f} precontrol_ail={pre_cmd.aileron:.3f} "
+                    f"precontrol_rud={pre_cmd.rudder:.3f} precontrol_thr={pre_cmd.turbojet_throttle:.3f} "
+                    f"precontrol_rato={pre_cmd.rato:.3f} "
+                    f"first_active_elev={active_cmd.elevator:.3f} first_active_ail={active_cmd.aileron:.3f} "
+                    f"first_active_rud={active_cmd.rudder:.3f} first_active_thr={active_cmd.turbojet_throttle:.3f} "
+                    f"first_active_rato={active_cmd.rato:.3f}"
+                )
+                precontrol.transition_reported = True
+
+            was_holding = startup_sync.enabled and startup_sync.phase == B3StartupPhase.STARTUP_SYNC_HOLD
+            startup_sync.maybe_release(
+                raw_decoded_command=raw_decoded_command,
+                channel_map=actuator_channel_map,
+                host_time=started,
+                pwm=packet.pwm,
+            )
+            if was_holding and startup_sync.phase == B3StartupPhase.RELEASED:
+                assert startup_sync.control_ready_record is not None
+                ready = startup_sync.control_ready_record
+                timing_gate.on_startup_sync_release(
+                    final_held_outgoing_timestamp=startup_sync.final_held_timestamp,
+                    release_host_time=started,
+                    release_count=startup_sync.release_count,
+                )
+                print(
+                    "STARTUP_SYNC_RELEASE "
+                    f"control_ready_host_time={ready['host_time']:.9f} "
+                    f"pwm1_4={ready['pwm1_4']}"
+                )
+
             if command_sink is not None:
                 try:
                     command_sink.send(jsbsim_command_from_actuator(actuator_command, timestamp_s=started))
                     if args.verbose:
                         print(
                             "JSBSIM_COMMAND "
+                            f"source={command_source} "
                             f"stale={int(actuator_command.stale)} "
                             f"elev={actuator_command.elevator:.3f} ail={actuator_command.aileron:.3f} "
                             f"rud={actuator_command.rudder:.3f} "
@@ -1075,11 +1890,67 @@ def main() -> int:
             previous_sent_timestamp = mapper.last_outgoing_timestamp
             rate_waited = wait_for_reply_slot(last_reply_mono, min_interval)
 
+            timing_quality = None
+            mapped_state = None
             try:
-                state = read_reply_state(args, reader, mapper, mock_source)
+                if startup_sync.enabled and startup_sync.phase == B3StartupPhase.STARTUP_SYNC_HOLD:
+                    state = startup_sync.held_reply_state(started)
+                else:
+                    mapped_state = read_reply_state(args, reader, mapper, mock_source)
+                    state = mapped_state
+                    if startup_sync.enabled:
+                        state = startup_sync.process_post_release_state(
+                            mapped_state,
+                            raw_decoded_command=raw_decoded_command,
+                            channel_map=actuator_channel_map,
+                        )
+                    timing_quality = timing_gate.check(
+                        request_count,
+                        host_time=started,
+                        source_simulation_timestamp=state.source_timestamp_s,
+                        outgoing_simulation_timestamp=state.timestamp_s,
+                    )
                 if args.b3_state_envelope_guard:
                     validate_b3_state_envelope(state)
                 payload = state.to_json_bytes(rc_pwm=rc_pwm)
+            except TimeDiscontinuityError as exc:
+                reason = f"B3_TIME_DISCONTINUITY_ABORT: {';'.join(exc.offenders)}"
+                print(f"B3_TIME_DISCONTINUITY_ABORT offenders={';'.join(exc.offenders)}")
+                write_b3_time_discontinuity_abort(
+                    args.b3_timing_quality_abort_row, exc.offenders, exc.previous, exc.current
+                )
+                if command_sink is not None:
+                    try:
+                        command_sink.send(
+                            jsbsim_command_from_actuator(NormalizedActuatorCommand.neutral(), timestamp_s=started)
+                        )
+                        print("B3_TIME_DISCONTINUITY_ABORT neutral_jsbsim_command_sent=1")
+                    except JSBSimCommandError as command_exc:
+                        reason = f"{reason};JSBSIM_NEUTRAL_COMMAND_ERROR: {command_exc}"
+                        print(f"B3_TIME_DISCONTINUITY_ABORT neutral_jsbsim_command_sent=0 error={command_exc}")
+                write_log(
+                    log_writer,
+                    csv_file,
+                    make_log_row(
+                        request_count=request_count,
+                        source=source,
+                        packet_valid=True,
+                        started=started,
+                        error_reason=reason,
+                        previous_sent_timestamp=previous_sent_timestamp,
+                        reply_reason="B3_TIME_DISCONTINUITY_ABORT",
+                        actuator_command=actuator_command,
+                        control_packet=packet,
+                        command_source=command_source,
+                        precontrol=precontrol,
+                        startup_sync=startup_sync,
+                        timing_gate=timing_gate,
+                        previous_request_received_host_time=request_previous_host_time,
+                        request_received_host_time=request_received_host_time,
+                        pwm_frame_received_host_time=request_received_host_time,
+                    ),
+                )
+                return 4
             except StateEnvelopeError as exc:
                 offenders = tuple(exc.offenders)
                 reason = f"B3_STATE_ENVELOPE_ABORT: {';'.join(offenders)}"
@@ -1108,6 +1979,14 @@ def main() -> int:
                         reply_reason="B3_STATE_ENVELOPE_ABORT",
                         actuator_command=actuator_command,
                         control_packet=packet,
+                        command_source=command_source,
+                        precontrol=precontrol,
+                        startup_sync=startup_sync,
+                        timing_quality=timing_quality,
+                        timing_gate=timing_gate,
+                        previous_request_received_host_time=request_previous_host_time,
+                        request_received_host_time=request_received_host_time,
+                        pwm_frame_received_host_time=request_received_host_time,
                     ),
                 )
                 return 3
@@ -1132,6 +2011,14 @@ def main() -> int:
                         reply_reason=reason,
                         actuator_command=actuator_command,
                         control_packet=packet,
+                        command_source=command_source,
+                        precontrol=precontrol,
+                        startup_sync=startup_sync,
+                        timing_quality=timing_quality,
+                        timing_gate=timing_gate,
+                        previous_request_received_host_time=request_previous_host_time,
+                        request_received_host_time=request_received_host_time,
+                        pwm_frame_received_host_time=request_received_host_time,
                     ),
                 )
                 if args.once:
@@ -1154,11 +2041,15 @@ def main() -> int:
                         print(f"SAVED_FIRST_REPLY {args.save_first_reply} bytes={len(payload)}")
                 reply_bytes = sock.sendto(payload, source)
                 last_reply_mono = time.monotonic()
+                reply_send_host_time = last_reply_mono
                 reason = actuator_reason
                 if actuator_reason and reply_reason == "OK":
                     reply_reason = actuator_reason
-                if not args.mock_state:
-                    mapper.accept_state(state)
+                startup_sync_holding = (
+                    startup_sync.enabled and startup_sync.phase == B3StartupPhase.STARTUP_SYNC_HOLD
+                )
+                if not args.mock_state and not startup_sync_holding:
+                    mapper.accept_state(mapped_state if mapped_state is not None else state)
                 if args.verbose:
                     missing = f" missing={','.join(state.missing_fields)}" if state.missing_fields else ""
                     reused = " REUSED_STATE" if state.reused_source_row else ""
@@ -1183,6 +2074,15 @@ def main() -> int:
                     reply_reason=reply_reason,
                     actuator_command=actuator_command,
                     control_packet=packet,
+                    command_source=command_source,
+                    precontrol=precontrol,
+                    startup_sync=startup_sync,
+                    timing_quality=timing_quality,
+                    timing_gate=timing_gate,
+                    previous_request_received_host_time=request_previous_host_time,
+                    request_received_host_time=request_received_host_time,
+                    pwm_frame_received_host_time=request_received_host_time,
+                    reply_send_host_time=reply_send_host_time if not args.dry_run else None,
                 ),
             )
             if args.once:
