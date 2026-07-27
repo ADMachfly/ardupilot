@@ -1171,6 +1171,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--startup-sync-airspeed-mps", type=float, default=69.0, help="Startup-sync held true airspeed"
     )
     parser.add_argument(
+        "--b3-startup-scoring-debug-rows",
+        type=int,
+        default=0,
+        help="Print B3 scoring diagnostics for the first N real post-release rows",
+    )
+    parser.add_argument(
         "--startup-sync-latitude-deg", type=float, default=32.5378085, help="Startup-sync held latitude"
     )
     parser.add_argument(
@@ -1481,28 +1487,57 @@ class B3StartupSync:
         channel_map: Optional[ActuatorChannelMap],
     ) -> bool:
         """Item-3 scoring_start bounds: roll/pitch/rates/PWM-valid/RATO=0."""
+        return bool(self.scoring_bounds_report(state, raw_decoded_command, channel_map)["bounds_ok"])
+
+    def scoring_bounds_report(
+        self,
+        state: SimState,
+        raw_decoded_command: NormalizedActuatorCommand,
+        channel_map: Optional[ActuatorChannelMap],
+    ) -> Dict[str, object]:
+        """Return per-condition scoring-start diagnostics for one post-release row."""
         assert self.target is not None
         roll_deg = radians_to_degrees(state.roll_rad)
         pitch_deg = radians_to_degrees(state.pitch_rad)
-        if abs(roll_deg - self.target.roll_deg) > 2.0:
-            return False
-        if abs(pitch_deg - self.target.pitch_deg) > 2.0:
-            return False
-        if max(abs(v) for v in state.gyro_rad_s) >= 0.2:
-            return False
-        if raw_decoded_command.stale:
-            return False
-        if channel_map is not None and active_pwm_invalid(raw_decoded_command, channel_map) is not None:
-            return False
-        if abs(raw_decoded_command.rato) > 1.0e-9:
-            return False
-        return True
+        p, q, r = state.gyro_rad_s
+        invalid_pwm = None if channel_map is None else active_pwm_invalid(raw_decoded_command, channel_map)
+        roll_in_bounds = abs(roll_deg - self.target.roll_deg) <= 2.0
+        pitch_in_bounds = abs(pitch_deg - self.target.pitch_deg) <= 2.0
+        rates_in_bounds = max(abs(v) for v in state.gyro_rad_s) < 0.2
+        stale_zero = not raw_decoded_command.stale
+        pwm_valid = invalid_pwm is None
+        rato_zero = abs(raw_decoded_command.rato) <= 1.0e-9
+        bounds_ok = roll_in_bounds and pitch_in_bounds and rates_in_bounds and stale_zero and pwm_valid and rato_zero
+        invalid_pwm_text = ""
+        if invalid_pwm is not None:
+            invalid_pwm_text = (
+                f"role={invalid_pwm.role} channel={invalid_pwm.channel} "
+                f"pwm={invalid_pwm.pwm} reason={invalid_pwm.reason}"
+            )
+        return {
+            "roll_deg": roll_deg,
+            "pitch_deg": pitch_deg,
+            "p": p,
+            "q": q,
+            "r": r,
+            "raw_stale": raw_decoded_command.stale,
+            "active_pwm_invalid": invalid_pwm_text,
+            "raw_rato": raw_decoded_command.rato,
+            "roll_in_bounds": roll_in_bounds,
+            "pitch_in_bounds": pitch_in_bounds,
+            "rates_in_bounds": rates_in_bounds,
+            "pwm_valid": pwm_valid,
+            "stale_zero": stale_zero,
+            "rato_zero": rato_zero,
+            "bounds_ok": bounds_ok,
+        }
 
     def process_post_release_state(
         self,
         state: SimState,
         raw_decoded_command: Optional[NormalizedActuatorCommand] = None,
         channel_map: Optional[ActuatorChannelMap] = None,
+        scoring_debug: Optional[Dict[str, object]] = None,
     ) -> SimState:
         """Apply the one-time attitude bias, rebase the timestamp, track scoring readiness.
 
@@ -1533,14 +1568,37 @@ class B3StartupSync:
         state.pitch_rad += self._pitch_bias_rad
         state.quaternion = euler_to_quaternion(state.roll_rad, state.pitch_rad, state.yaw_rad)
 
+        scoring_before = self.scoring_start_record
+        bounds_report = None
+        if raw_decoded_command is not None:
+            bounds_report = self.scoring_bounds_report(state, raw_decoded_command, channel_map)
+        fresh_rows_ready = self._fresh_rows_since_release >= 2
         if (
             self.scoring_start_record is None
-            and self._fresh_rows_since_release >= 2
+            and fresh_rows_ready
             and raw_decoded_command is not None
-            and self._bounds_ok(state, raw_decoded_command, channel_map)
+            and bounds_report is not None
+            and bounds_report["bounds_ok"]
         ):
             self.scoring_start_record = {"simulation_timestamp": state.timestamp_s}
+        if scoring_debug is not None:
+            scoring_debug.update({
+                "phase": self.phase,
+                "source_timestamp_s": state.source_timestamp_s,
+                "timestamp_s": state.timestamp_s,
+                "reused_source_row": state.reused_source_row,
+                "fresh_rows_since_release": self._fresh_rows_since_release,
+                "fresh_rows_ready": fresh_rows_ready,
+                "scoring_start_before": scoring_before,
+                "scoring_start_after": self.scoring_start_record,
+            })
+            if bounds_report is not None:
+                scoring_debug.update(bounds_report)
         return state
+
+    def startup_scoring_debug_row_ready(self, state: SimState) -> bool:
+        """True for fresh real post-release rows eligible for opt-in debug output."""
+        return self.enabled and self.phase == B3StartupPhase.RELEASED and not state.reused_source_row
 
     def scoring_eligible(
         self,
@@ -1614,6 +1672,44 @@ def read_reply_state(
                 f"matches previous sent timestamp {mapper.last_source_timestamp:.9f}"
             )
         time.sleep(min(0.002, remaining))
+
+
+def print_b3_startup_scoring_debug(request_count: int, diagnostic: Dict[str, object]) -> None:
+    def fmt_record(record: object) -> str:
+        if not record:
+            return ""
+        if isinstance(record, dict) and "simulation_timestamp" in record:
+            return f"{float(record['simulation_timestamp']):.9f}"
+        return str(record)
+
+    print(
+        "B3_STARTUP_SCORING_DEBUG "
+        f"request_count={request_count} "
+        f"phase={diagnostic.get('phase', '')} "
+        f"source_timestamp_s={float(diagnostic.get('source_timestamp_s', 0.0)):.9f} "
+        f"timestamp_s={float(diagnostic.get('timestamp_s', 0.0)):.9f} "
+        f"reused_source_row={int(bool(diagnostic.get('reused_source_row', False)))} "
+        f"fresh_rows_since_release={diagnostic.get('fresh_rows_since_release', '')} "
+        f"roll_deg={float(diagnostic.get('roll_deg', 0.0)):.6f} "
+        f"pitch_deg={float(diagnostic.get('pitch_deg', 0.0)):.6f} "
+        f"p={float(diagnostic.get('p', 0.0)):.9f} "
+        f"q={float(diagnostic.get('q', 0.0)):.9f} "
+        f"r={float(diagnostic.get('r', 0.0)):.9f} "
+        f"raw_stale={int(bool(diagnostic.get('raw_stale', False)))} "
+        f"active_pwm_invalid='{diagnostic.get('active_pwm_invalid', '')}' "
+        f"raw_rato={float(diagnostic.get('raw_rato', 0.0)):.9f} "
+        f"bounds_ok={int(bool(diagnostic.get('bounds_ok', False)))} "
+        f"scoring_before='{fmt_record(diagnostic.get('scoring_start_before'))}' "
+        f"scoring_after='{fmt_record(diagnostic.get('scoring_start_after'))}' "
+        f"roll_in_bounds={int(bool(diagnostic.get('roll_in_bounds', False)))} "
+        f"pitch_in_bounds={int(bool(diagnostic.get('pitch_in_bounds', False)))} "
+        f"rates_in_bounds={int(bool(diagnostic.get('rates_in_bounds', False)))} "
+        f"pwm_valid={int(bool(diagnostic.get('pwm_valid', False)))} "
+        f"stale_zero={int(bool(diagnostic.get('stale_zero', False)))} "
+        f"rato_zero={int(bool(diagnostic.get('rato_zero', False)))} "
+        f"fresh_rows_ready={int(bool(diagnostic.get('fresh_rows_ready', False)))}",
+        flush=True,
+    )
 
 
 def main() -> int:
@@ -1702,6 +1798,7 @@ def main() -> int:
     previous_request_received_host_time: Optional[float] = None
     saved_first_request = False
     saved_first_reply = False
+    startup_scoring_debug_logged = 0
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -1899,11 +1996,23 @@ def main() -> int:
                     mapped_state = read_reply_state(args, reader, mapper, mock_source)
                     state = mapped_state
                     if startup_sync.enabled:
+                        scoring_debug = (
+                            {}
+                            if (
+                                startup_scoring_debug_logged < max(0, args.b3_startup_scoring_debug_rows)
+                                and startup_sync.startup_scoring_debug_row_ready(mapped_state)
+                            )
+                            else None
+                        )
                         state = startup_sync.process_post_release_state(
                             mapped_state,
                             raw_decoded_command=raw_decoded_command,
                             channel_map=actuator_channel_map,
+                            scoring_debug=scoring_debug,
                         )
+                        if scoring_debug is not None:
+                            startup_scoring_debug_logged += 1
+                            print_b3_startup_scoring_debug(request_count, scoring_debug)
                     timing_quality = timing_gate.check(
                         request_count,
                         host_time=started,

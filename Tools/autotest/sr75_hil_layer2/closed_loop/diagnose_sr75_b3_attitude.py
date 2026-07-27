@@ -123,6 +123,8 @@ def build_matched_rows(
             "pwm2": row.get("pwm2", ""),
             "pwm3": row.get("pwm3", ""),
             "pwm4": row.get("pwm4", ""),
+            "left_elevon_norm": parse_float(row, ("act_left_elevon_norm",), 0.0) or 0.0,
+            "right_elevon_norm": parse_float(row, ("act_right_elevon_norm",), 0.0) or 0.0,
             "aileron_norm": parse_float(row, ("act_aileron_norm",), 0.0) or 0.0,
             "elevator_norm": parse_float(row, ("act_elevator_norm",), 0.0) or 0.0,
             "rudder_norm": parse_float(row, ("act_rudder_norm",), 0.0) or 0.0,
@@ -136,6 +138,21 @@ def max_and_rms(errors: Sequence[float]) -> Tuple[float, float]:
     max_error = max(abs(value) for value in errors)
     rms_error = math.sqrt(sum(value * value for value in errors) / len(errors))
     return max_error, rms_error
+
+
+def parse_pwm_delta(row: Dict[str, object], first: str, second: str) -> float:
+    try:
+        return abs(float(row.get(first, "") or 0.0) - float(row.get(second, "") or 0.0))
+    except ValueError:
+        return 0.0
+
+
+def meaningful_control(row: Dict[str, object]) -> bool:
+    return (
+        parse_pwm_delta(row, "pwm1", "pwm2") >= 3.0
+        or abs(float(row["aileron_norm"])) >= 0.003
+        or abs(float(row["left_elevon_norm"]) - float(row["right_elevon_norm"])) >= 0.006
+    )
 
 
 def analyze(
@@ -170,10 +187,12 @@ def analyze(
 
     first_aileron_sign = 0
     first_aileron_time = None
+    first_meaningful_control_row = None
     for row in matched:
-        if abs(row["aileron_norm"]) > 1e-6:
+        if meaningful_control(row):
             first_aileron_sign = (row["aileron_norm"] > 0) - (row["aileron_norm"] < 0)
             first_aileron_time = row["sim_time_s"]
+            first_meaningful_control_row = row
             break
 
     is_corrective = bool(
@@ -202,6 +221,7 @@ def analyze(
         "roll_error_sign": roll_error_sign,
         "first_aileron_sign": first_aileron_sign,
         "first_aileron_time_s": first_aileron_time,
+        "first_meaningful_control_row": first_meaningful_control_row,
         "is_corrective": is_corrective,
         "path_pass": path_pass,
     }
@@ -226,6 +246,16 @@ def print_report(result: Dict[str, object], case: Optional[str]) -> None:
     )
     print(f"final_roll_deg={result['final_roll_deg']:.4f} roll_error_deg={result['roll_error_deg']:.4f}")
     print(f"roll_error_sign={result['roll_error_sign']} first_aileron_sign={result['first_aileron_sign']}")
+    meaningful_row = result["first_meaningful_control_row"]
+    if meaningful_row is not None:
+        print(
+            "meaningful_control_row "
+            f"t={meaningful_row['sim_time_s']:.6f} "
+            f"pwm1={meaningful_row['pwm1']} pwm2={meaningful_row['pwm2']} "
+            f"aileron={meaningful_row['aileron_norm']:.6f} "
+            f"left_elevon={meaningful_row['left_elevon_norm']:.6f} "
+            f"right_elevon={meaningful_row['right_elevon_norm']:.6f}"
+        )
     if case and case in EXPECTED_CASE_ATTITUDE_DEG:
         expected_roll, expected_pitch = EXPECTED_CASE_ATTITUDE_DEG[case]
         print(f"case={case} expected_roll_deg={expected_roll} expected_pitch_deg={expected_pitch}")
@@ -248,14 +278,14 @@ def _write_csv(path: str, fieldnames: Sequence[str], rows: Sequence[Dict[str, ob
         writer.writerows(rows)
 
 
-def _self_test_logs(tmpdir: str, corrective: bool) -> Tuple[str, str, str]:
+def _self_test_logs(tmpdir: str, corrective: bool, neutral_first_row: bool = False) -> Tuple[str, str, str]:
     responder_path = os.path.join(tmpdir, "responder.csv")
     jsb_path = os.path.join(tmpdir, "jsb.csv")
     mavlink_path = os.path.join(tmpdir, "mavlink.csv")
 
     responder_fields = [
         "simulation_timestamp", "roll", "pitch", "yaw", "act_aileron_norm", "act_elevator_norm",
-        "act_rudder_norm", "pwm1", "pwm2", "pwm3", "pwm4",
+        "act_rudder_norm", "act_left_elevon_norm", "act_right_elevon_norm", "pwm1", "pwm2", "pwm3", "pwm4",
     ]
     jsb_fields = ["/fdm/jsbsim/simulation/sim-time-sec", "/fdm/jsbsim/attitude/phi-deg",
                   "/fdm/jsbsim/attitude/theta-rad", "/fdm/jsbsim/attitude/psi-deg"]
@@ -268,16 +298,29 @@ def _self_test_logs(tmpdir: str, corrective: bool) -> Tuple[str, str, str]:
     for index in range(60):
         t_s = index * 0.05
         roll_deg = 15.0 * math.exp(-t_s / 2.0) if corrective else 15.0
+        row_aileron_sign = aileron_sign
+        pwm1 = "1400"
+        pwm2 = "1600"
+        left_elevon = -row_aileron_sign * 0.3
+        right_elevon = row_aileron_sign * 0.3
+        if neutral_first_row and index == 0:
+            row_aileron_sign = 1.0
+            pwm1 = "1500"
+            pwm2 = "1501"
+            left_elevon = -0.001
+            right_elevon = 0.001
         responder_rows.append({
             "simulation_timestamp": f"{t_s:.3f}",
             "roll": f"{math.radians(roll_deg):.9f}",
             "pitch": f"{math.radians(3.0):.9f}",
             "yaw": "0.0",
-            "act_aileron_norm": f"{aileron_sign * 0.3:.3f}",
+            "act_aileron_norm": f"{row_aileron_sign * 0.3:.3f}" if not (neutral_first_row and index == 0) else "0.001",
             "act_elevator_norm": "0.01",
             "act_rudder_norm": "0.0",
-            "pwm1": "1400",
-            "pwm2": "1600",
+            "act_left_elevon_norm": f"{left_elevon:.3f}",
+            "act_right_elevon_norm": f"{right_elevon:.3f}",
+            "pwm1": pwm1,
+            "pwm2": pwm2,
             "pwm3": "1550",
             "pwm4": "1500",
         })
@@ -316,6 +359,11 @@ def run_self_test() -> int:
         result = analyze(matched, desired_roll_deg=0.0, desired_pitch_deg=3.0, path_tolerance_deg=1.0)
         check("attitude_agreement_path_pass", result["path_pass"] is True)
         check("corrective_roll_sign_pass", result["is_corrective"] is True)
+
+        responder_path, jsb_path, mavlink_path = _self_test_logs(tmpdir, corrective=True, neutral_first_row=True)
+        matched = build_matched_rows(read_csv(responder_path), read_csv(jsb_path), read_csv(mavlink_path))
+        result = analyze(matched, desired_roll_deg=0.0, desired_pitch_deg=3.0, path_tolerance_deg=1.0)
+        check("neutral_first_row_ignored_for_roll_sign", result["first_aileron_time_s"] == 0.05)
 
         responder_path, jsb_path, mavlink_path = _self_test_logs(tmpdir, corrective=False)
         matched = build_matched_rows(read_csv(responder_path), read_csv(jsb_path), read_csv(mavlink_path))

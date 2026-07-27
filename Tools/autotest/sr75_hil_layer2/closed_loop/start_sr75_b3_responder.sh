@@ -55,6 +55,13 @@ if [[ "${SR75_B3_TIMING_QUALITY_GATE:-0}" == "1" ]]; then
     )
 fi
 
+B3_DEBUG_ARGS=()
+if [[ "${SR75_B3_STARTUP_SCORING_DEBUG_ROWS:-0}" != "0" ]]; then
+    B3_DEBUG_ARGS+=(
+        --b3-startup-scoring-debug-rows "${SR75_B3_STARTUP_SCORING_DEBUG_ROWS}"
+    )
+fi
+
 cd "${REPO_ROOT}"
 setsid python3 Tools/autotest/sr75_hil_layer2/sim_json/sr75_sim_json_responder.py \
     --listen-host "${LISTEN_HOST}" \
@@ -79,6 +86,7 @@ setsid python3 Tools/autotest/sr75_hil_layer2/sim_json/sr75_sim_json_responder.p
     "${PRECONTROL_ARGS[@]}" \
     "${STARTUP_SYNC_ARGS[@]}" \
     "${TIMING_QUALITY_ARGS[@]}" \
+    "${B3_DEBUG_ARGS[@]}" \
     >"${RESPONDER_LOG}" 2>&1 < /dev/null &
 echo "$!" > "${PID_FILE}"
 
