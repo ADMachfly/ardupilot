@@ -475,8 +475,10 @@ void JSON::recv_fdm(const struct sitl_input &input)
         // SITL airspeed backend receives the equivalent differential pressure.
         airspeed = eas_mps;
         airspeed_pitot = airspeed;
-        sitl->state.airspeed_raw_pressure[0] = pressure_pa;
+        airspeed_raw_pressure[0] = pressure_pa;
+        airspeed_raw_pressure_valid[0] = true;
     } else {
+        airspeed_raw_pressure_valid[0] = false;
         
         // wind is not supported yet for JSON sim, assume zero for now        
         wind_ef.zero(); 

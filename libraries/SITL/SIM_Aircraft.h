@@ -237,6 +237,8 @@ protected:
     Vector3f accel_body{0.0f, 0.0f, -GRAVITY_MSS}; // m/s/s NED, body frame
     float airspeed;                      // m/s, EAS airspeed
     float airspeed_pitot;                // m/s, EAS airspeed, as seen by fwd pitot tube
+    float airspeed_raw_pressure[AIRSPEED_MAX_SENSORS] {};
+    bool airspeed_raw_pressure_valid[AIRSPEED_MAX_SENSORS] {};
     float battery_voltage;
     float battery_current;
     float local_ground_level;            // ground level at local position

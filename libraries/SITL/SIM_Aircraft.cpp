@@ -435,6 +435,8 @@ void Aircraft::fill_fdm(struct sitl_fdm &fdm)
     fdm.quaternion.from_rotation_matrix(dcm);
     fdm.airspeed = airspeed_pitot;
     fdm.velocity_air_bf = velocity_air_bf;
+    memcpy(fdm.airspeed_raw_pressure, airspeed_raw_pressure, sizeof(fdm.airspeed_raw_pressure));
+    memcpy(fdm.airspeed_raw_pressure_valid, airspeed_raw_pressure_valid, sizeof(fdm.airspeed_raw_pressure_valid));
     fdm.battery_voltage = battery_voltage;
     fdm.battery_current = battery_current;
     fdm.motor_mask = motor_mask | sitl->vibe_motor_mask;

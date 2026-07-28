@@ -91,6 +91,7 @@ struct sitl_fdm {
     #define SITL_NUM_RANGEFINDERS 10
     float rangefinder_m[SITL_NUM_RANGEFINDERS];
     float airspeed_raw_pressure[AIRSPEED_MAX_SENSORS];
+    bool airspeed_raw_pressure_valid[AIRSPEED_MAX_SENSORS] {};
 
     struct {
         float speed;
