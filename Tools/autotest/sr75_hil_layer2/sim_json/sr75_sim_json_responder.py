@@ -369,13 +369,15 @@ class LatestCSVReader:
         lines = [line for line in data.splitlines() if line.strip()]
         if len(lines) < 2:
             raise StateError(f"{self.path} has no complete data rows")
-        last_line = lines[-1]
-        parsed = list(csv.reader([last_line]))
-        if not parsed:
-            raise StateError("could not parse latest CSV row")
-        values = parsed[0]
-        row = dict(zip(self.headers, values))
-        return row, last_line, stat.st_mtime
+        for line in reversed(lines[1:]):
+            parsed = list(csv.reader([line]))
+            if not parsed:
+                continue
+            values = parsed[0]
+            if len(values) == len(self.headers):
+                row = dict(zip(self.headers, values))
+                return row, line, stat.st_mtime
+        raise StateError(f"{self.path} has no complete data rows")
 
 
 class StateMapper:
@@ -802,7 +804,12 @@ B3_ENVELOPE_LIMITS = {
 }
 
 
-def b3_state_envelope_offenders(state: SimState) -> Tuple[str, ...]:
+def b3_state_envelope_offenders(
+    state: SimState,
+    *,
+    airspeed_max_mps: Optional[float] = None,
+    airspeed_limit_name: str = "B3",
+) -> Tuple[str, ...]:
     checks = {
         "timestamp_s": state.timestamp_s,
         "source_timestamp_s": state.source_timestamp_s,
@@ -835,9 +842,16 @@ def b3_state_envelope_offenders(state: SimState) -> Tuple[str, ...]:
     altitude_min, altitude_max = B3_ENVELOPE_LIMITS["altitude_m"]
     if not altitude_min <= state.altitude_m <= altitude_max:
         offenders.append(f"altitude_m={state.altitude_m:.6g}:outside[{altitude_min},{altitude_max}]")
-    tas_min, tas_max = B3_ENVELOPE_LIMITS["airspeed_mps"]
+    tas_min, b3_tas_max = B3_ENVELOPE_LIMITS["airspeed_mps"]
+    tas_max = b3_tas_max if airspeed_max_mps is None else airspeed_max_mps
     if not tas_min <= state.airspeed_mps <= tas_max:
         offenders.append(f"airspeed_mps={state.airspeed_mps:.6g}:outside[{tas_min},{tas_max}]")
+    elif tas_max > b3_tas_max and state.airspeed_mps > b3_tas_max:
+        print(
+            f"B3_STATE_ENVELOPE_{airspeed_limit_name}_AIRSPEED_EXCEEDANCE "
+            f"airspeed_mps={state.airspeed_mps:.6g}:outside[{tas_min},{b3_tas_max}] "
+            f"validation_limit={tas_max}"
+        )
     velocity_axis_limit = B3_ENVELOPE_LIMITS["velocity_ned_mps_abs"]
     for axis, value in zip(("n", "e", "d"), state.velocity_ned_mps):
         if abs(value) >= velocity_axis_limit:
@@ -861,10 +875,36 @@ def b3_state_envelope_offenders(state: SimState) -> Tuple[str, ...]:
     return tuple(offenders)
 
 
-def validate_b3_state_envelope(state: SimState) -> None:
-    offenders = b3_state_envelope_offenders(state)
+def validate_b3_state_envelope(
+    state: SimState,
+    *,
+    airspeed_max_mps: Optional[float] = None,
+    airspeed_limit_name: str = "B3",
+) -> None:
+    offenders = b3_state_envelope_offenders(
+        state,
+        airspeed_max_mps=airspeed_max_mps,
+        airspeed_limit_name=airspeed_limit_name,
+    )
     if offenders:
         raise StateEnvelopeError(offenders)
+
+
+def b3_rato_thrust_newtons(state: SimState) -> Optional[float]:
+    if state.source_row is None:
+        return None
+    thrust_lbf, thrust_name = parse_float(state.source_row, (
+        "/fdm/jsbsim/propulsion/engine[2]/thrust-lbs",
+        "propulsion/engine[2]/thrust-lbs",
+        "rato_thrust_lbs",
+        "rato_thrust_lbf",
+        "rato_thrust_n",
+    ), required=False)
+    if thrust_lbf is None:
+        return None
+    if thrust_name and thrust_name.endswith("_n"):
+        return thrust_lbf
+    return thrust_lbf * 4.4482216152605
 
 
 def write_b3_state_envelope_abort(path: Optional[str], state: SimState, offenders: Sequence[str]) -> None:
@@ -1120,6 +1160,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--b3-state-envelope-abort-row",
         default="/tmp/sr75_b3/b3_state_envelope_abort.csv",
         help="CSV path for the offending source row when --b3-state-envelope-guard aborts",
+    )
+    parser.add_argument(
+        "--b3-state-envelope-rato-validation-airspeed-max-mps",
+        type=float,
+        default=None,
+        help=(
+            "Optional SR-75 RATO validation airspeed limit. When set, the normal B3 250 m/s "
+            "airspeed exceedance is logged during RATO boost and bounded post-RATO coast, and this "
+            "separately named limit is used for abort decisions in those phases. Other envelope checks "
+            "are unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--b3-state-envelope-post-rato-coast-timeout-s",
+        type=float,
+        default=5.0,
+        help="Maximum bounded post-RATO coast time before the normal B3 250 m/s airspeed limit must be restored",
     )
     parser.add_argument(
         "--b3-timing-quality-gate",
@@ -1915,6 +1972,8 @@ def main() -> int:
     saved_first_request = False
     saved_first_reply = False
     startup_scoring_debug_logged = 0
+    b3_guard_phase = "NORMAL"
+    post_rato_coast_start_timestamp: Optional[float] = None
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -2138,7 +2197,73 @@ def main() -> int:
                         outgoing_simulation_timestamp=state.timestamp_s,
                     )
                 if args.b3_state_envelope_guard:
-                    validate_b3_state_envelope(state)
+                    airspeed_max_mps = None
+                    airspeed_limit_name = "B3"
+                    rato_validation_limit = args.b3_state_envelope_rato_validation_airspeed_max_mps
+                    if rato_validation_limit is not None:
+                        rato_validation_limit = min(rato_validation_limit, 350.0)
+                    rato_active = actuator_command.rato > 0.5
+                    if rato_active:
+                        if b3_guard_phase != "RATO_BOOST":
+                            print(
+                                "B3_STATE_ENVELOPE_GUARD_PHASE "
+                                f"{b3_guard_phase}->RATO_BOOST "
+                                f"source_timestamp={state.source_timestamp_s:.9f} "
+                                f"airspeed_mps={state.airspeed_mps:.6f}"
+                            )
+                        b3_guard_phase = "RATO_BOOST"
+                        post_rato_coast_start_timestamp = None
+                    elif b3_guard_phase == "RATO_BOOST":
+                        b3_guard_phase = "POST_RATO_COAST"
+                        post_rato_coast_start_timestamp = state.source_timestamp_s
+                        print(
+                            "B3_STATE_ENVELOPE_GUARD_PHASE "
+                            f"RATO_BOOST->POST_RATO_COAST "
+                            f"source_timestamp={state.source_timestamp_s:.9f} "
+                            f"airspeed_mps={state.airspeed_mps:.6f}"
+                        )
+                    elif b3_guard_phase == "POST_RATO_COAST":
+                        tas_min, tas_max = B3_ENVELOPE_LIMITS["airspeed_mps"]
+                        if tas_min <= state.airspeed_mps <= tas_max:
+                            print(
+                                "B3_STATE_ENVELOPE_GUARD_PHASE "
+                                f"POST_RATO_COAST->NORMAL "
+                                f"source_timestamp={state.source_timestamp_s:.9f} "
+                                f"airspeed_mps={state.airspeed_mps:.6f}"
+                            )
+                            b3_guard_phase = "NORMAL"
+                            post_rato_coast_start_timestamp = None
+                    if b3_guard_phase == "RATO_BOOST" and rato_validation_limit is not None:
+                        airspeed_max_mps = rato_validation_limit
+                        airspeed_limit_name = "RATO_VALIDATION"
+                    elif b3_guard_phase == "POST_RATO_COAST" and rato_validation_limit is not None:
+                        thrust_n = b3_rato_thrust_newtons(state)
+                        post_elapsed = (
+                            0.0
+                            if post_rato_coast_start_timestamp is None
+                            else state.source_timestamp_s - post_rato_coast_start_timestamp
+                        )
+                        post_offenders = []
+                        if actuator_command.rato > 0.5:
+                            post_offenders.append(f"post_rato_act_rato_norm={actuator_command.rato:.6g}:expected0")
+                        if thrust_n is None:
+                            post_offenders.append("post_rato_thrust_n=missing")
+                        elif abs(thrust_n) > 100.0:
+                            post_offenders.append(f"post_rato_thrust_n={thrust_n:.6g}:expected0")
+                        if post_elapsed > args.b3_state_envelope_post_rato_coast_timeout_s:
+                            post_offenders.append(
+                                "post_rato_coast_elapsed_s="
+                                f"{post_elapsed:.6g}:>{args.b3_state_envelope_post_rato_coast_timeout_s}"
+                            )
+                        if post_offenders:
+                            raise StateEnvelopeError(post_offenders)
+                        airspeed_max_mps = rato_validation_limit
+                        airspeed_limit_name = "POST_RATO_COAST"
+                    validate_b3_state_envelope(
+                        state,
+                        airspeed_max_mps=airspeed_max_mps,
+                        airspeed_limit_name=airspeed_limit_name,
+                    )
                 payload = state.to_json_bytes(rc_pwm=rc_pwm)
             except TimeDiscontinuityError as exc:
                 reason = f"B3_TIME_DISCONTINUITY_ABORT: {';'.join(exc.offenders)}"

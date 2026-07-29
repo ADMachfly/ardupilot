@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<initialize name="SR75 Layer 2J-B3 no-RATO cruise trim reference start">
+  <!--
+    Validated no-RATO (configuration C) cruise trim reference, promoted from
+    the /tmp closed-loop B3C-C25 trim search into a versioned init file.
+    Matching trim controls (set by the runscript/systems using this init,
+    not by this file): elevator common bias = -0.300, turbojet throttle =
+    0.37. Continuous stabilization for 20 s before scoring gives:
+      pitch  ~= 3.591 deg
+      alpha  ~= 3.495 deg
+      gamma  ~= 0.096 deg
+      TAS    ~= 65.64 m/s
+    starting from the alpha/gamma/pitch seed below. Same lat/lon/heading as
+    the rest of the layer2j_b3_* family for continuity with prior B3 runs.
+  -->
+  <latitude unit="DEG">32.5378085</latitude>
+  <longitude unit="DEG">74.3661944</longitude>
+  <altitude unit="M">3000.0</altitude>
+  <vt unit="KTS">134.125270</vt>
+  <gamma unit="DEG">-1.6</gamma>
+  <alpha unit="DEG">4.5</alpha>
+  <psi unit="DEG">315.0</psi>
+  <phi unit="DEG">0.0</phi>
+  <theta unit="DEG">2.9</theta>
+  <p unit="RAD/SEC">0.0</p>
+  <q unit="RAD/SEC">0.0</q>
+  <r unit="RAD/SEC">0.0</r>
+</initialize>

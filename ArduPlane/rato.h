@@ -97,6 +97,7 @@ public:
 private:
     State state;
     uint32_t start_ms;
+    uint32_t burn_start_ms;
 
     // Stored launch reference values.
     Location launch_location;
@@ -109,6 +110,7 @@ private:
 
     // Seconds since RATO initialisation.
     float elapsed_s() const; 
+    float burn_elapsed_s() const;
     
     // Returns true when altitude + distance + speed release envelope is satisfied.
     bool release_envelope_met() const;

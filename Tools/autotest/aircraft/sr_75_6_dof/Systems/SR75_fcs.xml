@@ -3,6 +3,7 @@
 
   <property value="0.0">fcs/turbojet-throttle-cmd-norm</property>
   <property value="0.0">fcs/rato-throttle-cmd-norm</property>
+  <property value="0.0">fcs/rato-eject-cmd-norm</property>
 
   <channel name="Throttle">
     <!-- Shared SR-75 FADEC throttle controller -->
@@ -133,6 +134,34 @@
       <gain>0.436332</gain>
       <output>fcs/rudder4-pos-rad</output>
     </pure_gain>
+  </channel>
+
+  <channel name="RATO Staging">
+    <!-- Phase-aware booster mass: fcs/rato-eject-cmd-norm is a 0..1 command,
+         driven externally by whatever sequences booster release (test harness
+         runscript event today; ArduPlane's RATOController eject output in a
+         future HIL phase). At 0 the dry booster+case pointmass (see
+         mass_balance/pointmass[RATO_BOOSTER_DRY_AND_CASE] in
+         sr_75_6_dof.xml, 10.0 kg = 22.046226 lbs) is carried normally,
+         matching configuration A (full RATO, propellant depleting via the
+         SR75_RATO rocket propflowmax) and configuration B (dry booster retained
+         after burnout). At 1 the pointmass weight is driven to zero,
+         matching configuration C (no-RATO post-ejection cruise).
+         JSBSim recomputes total mass/CG/inertia from this every frame, so no
+         separate CG/inertia bookkeeping is needed here. -->
+
+    <fcs_function name="fcs/rato-booster-weight-lbs">
+      <function>
+        <product>
+          <value>22.046226</value>
+          <difference>
+            <value>1.0</value>
+            <property>fcs/rato-eject-cmd-norm</property>
+          </difference>
+        </product>
+      </function>
+      <output>inertia/pointmass-weight-lbs</output>
+    </fcs_function>
   </channel>
 
 </flight_control>

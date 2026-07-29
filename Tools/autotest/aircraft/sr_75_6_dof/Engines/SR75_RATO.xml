@@ -1,64 +1,16 @@
 <?xml version="1.0"?>
-<turbine_engine name="SR75_RATO_5p8kN">
+<rocket_engine name="SR75_RATO_5p8kN">
 
-  <!-- RATO placeholder for initial launch dynamics only. -->
-  <!-- Implemented as a direct-thrust placeholder that stays running from startup. -->
-  <!-- ArduPilot controls the burn window, so the placeholder must not consume propellant at idle. -->
-  <milthrust unit="N">5800</milthrust>
-  <maxthrust unit="N">5800</maxthrust>
+  <!-- RATO placeholder for initial launch dynamics only.
+       Modeled as a command-gated rocket so it has fixed thrust, no turbine
+       spool delay, and zero propellant flow whenever throttle-cmd-norm[2] is
+       zero. The 9.18 kg tank is depleted by the commanded burn; the 10 kg dry
+       booster is retained until the separate staging command removes it. -->
 
-  <bypassratio>0.0</bypassratio>
-  <bleed>0.0</bleed>
-  <tsfc>0.0</tsfc>
-  <atsfc>0.0</atsfc>
-  <idlefuelflow unit="KG/MIN">0.0</idlefuelflow>
+  <!-- 5800 N = 1303.891 lbf. 3.06 kg/s = 6.746 lb/s, so Isp is 193.28 s. -->
+  <isp>193.28</isp>
+  <propflowmax unit="KG/SEC">3.06</propflowmax>
+  <maxthrottle>1.0</maxthrottle>
+  <minthrottle>0.0</minthrottle>
 
-  <ignitionn1>5.0</ignitionn1>
-  <ignitionn2>20.0</ignitionn2>
-  <idlen1>30.0</idlen1>
-  <idlen2>55.0</idlen2>
-  <maxn1>100.0</maxn1>
-  <maxn2>100.0</maxn2>
-
-  <n1spinup>0.05</n1spinup>
-  <n2spinup>0.05</n2spinup>
-  <n1startrate>100.0</n1startrate>
-  <n2startrate>100.0</n2startrate>
-  <n1spindown>0.05</n1spindown>
-  <n2spindown>0.05</n2spindown>
-
-  <augmented>0</augmented>
-  <augmethod>0</augmethod>
-  <injected>0</injected>
-
-  <function name="IdleThrust">
-    <description>No useful idle thrust for the RATO placeholder.</description>
-    <value>0.0</value>
-  </function>
-
-  <function name="MilThrust">
-    <description>Full RATO thrust multiplier.</description>
-    <value>1.0</value>
-  </function>
-
-  <function name="N1SpoolUp">
-    <description>RATO thrust is effectively immediate for the launch burn.</description>
-    <value>100000.0</value>
-  </function>
-
-  <function name="N2SpoolUp">
-    <description>RATO thrust is effectively immediate for the launch burn.</description>
-    <value>100000.0</value>
-  </function>
-
-  <function name="N1SpoolDown">
-    <description>RATO thrust ends immediately at burnout.</description>
-    <value>100000.0</value>
-  </function>
-
-  <function name="N2SpoolDown">
-    <description>RATO thrust ends immediately at burnout.</description>
-    <value>100000.0</value>
-  </function>
-
-</turbine_engine>
+</rocket_engine>

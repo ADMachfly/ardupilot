@@ -150,6 +150,7 @@ void RATOController::reset()
 {
     state = State::DISABLED;
     start_ms = 0;
+    burn_start_ms = 0;
 
     // Clear launch reference and measured values.
     launch_alt_m = 0.0f;
@@ -172,6 +173,7 @@ void RATOController::init(const Location& loc, float alt_m)
 
     // Start RATO timer.
     start_ms = AP_HAL::millis();
+    burn_start_ms = 0;
 
     // Clear previous measured values.
     last_dist_m = 0.0f;
@@ -202,9 +204,10 @@ bool RATOController::update(float dist_m, float alt_gain_m, float speed_mps)
     last_speed_mps = speed_mps;
 
     gcs().send_text(MAV_SEVERITY_INFO,
-                "RATO state=%s t=%.2f d=%.1f alt=%.1f spd=%.1f",
+                "RATO state=%s t=%.2f burn=%.2f d=%.1f alt=%.1f spd=%.1f",
                 state_name(),
                 (double)elapsed_s(),
+                (double)burn_elapsed_s(),
                 (double)dist_m,
                 (double)alt_gain_m,
                 (double)speed_mps);
@@ -244,6 +247,7 @@ case State::READY:
     case State::IGNITION:
     // Later this state will command ignition output channel.    
         set_ignition_output(true);
+        burn_start_ms = AP_HAL::millis();
         state = State::BOOST;
         return false;
 
@@ -255,7 +259,7 @@ case State::READY:
         Physics thrust will be added later in SIM_Plane.cpp.
         For now this is only timing logic.
     */    
-        if (elapsed_s() >= burn_time.get()) {
+        if (burn_elapsed_s() >= burn_time.get()) {
             set_ignition_output(false);
             state = State::BURNOUT;
         }
@@ -397,6 +401,15 @@ float RATOController::elapsed_s() const
     }
 
     return (AP_HAL::millis() - start_ms) * 0.001f;
+}
+
+float RATOController::burn_elapsed_s() const
+{
+    if (burn_start_ms == 0) {
+        return 0.0f;
+    }
+
+    return (AP_HAL::millis() - burn_start_ms) * 0.001f;
 }
 
 const char *RATOController::state_name() const
