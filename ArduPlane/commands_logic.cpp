@@ -590,6 +590,38 @@ void ModeAuto::do_nav_delay(const AP_Mission::Mission_Command& cmd)
 /********************************************************************************/
 bool Plane::verify_takeoff()
 {
+    bool trust_ahrs_yaw = AP::ahrs().initialised();
+#if AP_AHRS_DCM_ENABLED
+    trust_ahrs_yaw |= ahrs.dcm_yaw_initialised();
+#endif
+    if (trust_ahrs_yaw && steer_state.hold_course_cd == -1) {
+        // Capture the takeoff heading before the RATO early return below so
+        // BOOST has a valid heading reference while roll demand remains level.
+        if (gps.status() >= AP_GPS_FixType::FIX_3D &&
+            gps.ground_speed() > GPS_GND_CRS_MIN_SPD &&
+            hal.util->safety_switch_state() != AP_HAL::Util::SAFETY_DISARMED) {
+            float takeoff_course_deg;
+            if (sr75_mission_takeoff_heading(takeoff_course_deg)) {
+                steer_state.hold_course_cd = wrap_360_cd(takeoff_course_deg * 100);
+
+                gcs().send_text(MAV_SEVERITY_INFO,
+                                "SR75: Holding mission takeoff course %.1f deg",
+                                (double)takeoff_course_deg);
+            } else {
+                takeoff_course_deg = gps.ground_course();
+                float takeoff_course = wrap_PI(radians(takeoff_course_deg)) - steer_state.locked_course_err;
+                takeoff_course = wrap_PI(takeoff_course);
+                steer_state.hold_course_cd = wrap_360_cd(degrees(takeoff_course) * 100);
+
+                gcs().send_text(MAV_SEVERITY_INFO,
+                                "Holding course %d at %.1fm/s (%.1f)",
+                                (int)steer_state.hold_course_cd,
+                                (double)gps.ground_speed(),
+                                (double)degrees(steer_state.locked_course_err));
+            }
+        }
+    }
+
     // SR-75 RATO: update state machine during TAKEOFF verification.
     //
     // RATOController receives measured values from ArduPlane/EKF:
@@ -638,10 +670,6 @@ bool Plane::verify_takeoff()
         }
     }
         
-    bool trust_ahrs_yaw = AP::ahrs().initialised();
-#if AP_AHRS_DCM_ENABLED
-    trust_ahrs_yaw |= ahrs.dcm_yaw_initialised();
-#endif
     if (trust_ahrs_yaw && steer_state.hold_course_cd == -1) {
         // once we reach sufficient speed for good GPS course
         // estimation we save our current GPS ground course

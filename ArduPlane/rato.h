@@ -68,8 +68,13 @@ public:
     bool is_complete() const;
     bool is_aborted() const;
     bool is_boosting() const; // ← new, sits next to is_active(), is_complete(), is_aborted()
+    bool is_post_boost_handoff() const
+    {
+        return state == State::BURNOUT || state == State::ENGINE_TAKEOVER;
+    }
     bool ignition_commanded() const { return state == State::IGNITION || state == State::BOOST; }
     bool ejection_commanded() const { return state == State::EJECT; }
+    float get_burn_elapsed_s() const { return burn_elapsed_s(); }
 
     State get_state() const { return state; }
     const char *state_name() const;

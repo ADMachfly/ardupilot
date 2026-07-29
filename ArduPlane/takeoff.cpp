@@ -148,6 +148,11 @@ no_launch:
  */
 void Plane::takeoff_calc_roll(void)
 {
+    if (g2.rato.enable.get() > 0 && g2.rato.is_boosting()) {
+        nav_roll_cd = 0;
+        return;
+    }
+
     if (steer_state.hold_course_cd == -1) {
         // we don't yet have a heading to hold - just level
         // the wings until we get up enough speed to get a GPS heading
@@ -188,6 +193,43 @@ void Plane::takeoff_calc_roll(void)
  */
 void Plane::takeoff_calc_pitch(void)
 {
+    if (g2.rato.enable.get() > 0 && g2.rato.is_boosting()) {
+        const int32_t min_pitch_cd = MAX(get_takeoff_pitch_min_cd(), pitch_limit_min * 100);
+        const int32_t max_pitch_cd = aparm.pitch_limit_max.get() * 100;
+        nav_pitch_cd = constrain_int32(g2.rato.pitch_target_deg.get() * 100, min_pitch_cd, max_pitch_cd);
+        TECS_controller.set_pitch_min(0.01f * nav_pitch_cd);
+        TECS_controller.set_pitch_max(0.01f * nav_pitch_cd);
+        return;
+    }
+    if (g2.rato.enable.get() > 0 && g2.rato.is_post_boost_handoff()) {
+        const int32_t min_pitch_cd = pitch_limit_min * 100;
+        const int32_t max_pitch_cd = aparm.pitch_limit_max.get() * 100;
+        const float rato_pitch_deg = g2.rato.pitch_target_deg.get();
+        const float normal_pitch_deg = constrain_float(get_takeoff_pitch_min_cd() * 0.01f,
+                                                       min_pitch_cd * 0.01f,
+                                                       max_pitch_cd * 0.01f);
+        const float handoff_pitch_deg = constrain_float(0.5f * rato_pitch_deg,
+                                                        min_pitch_cd * 0.01f,
+                                                        max_pitch_cd * 0.01f);
+        const float post_burn_s = MAX(g2.rato.get_burn_elapsed_s() - g2.rato.burn_time.get(), 0.0f);
+        float demanded_pitch_deg;
+
+        if (post_burn_s < 1.0f) {
+            demanded_pitch_deg = linear_interpolate(rato_pitch_deg, handoff_pitch_deg, post_burn_s, 0.0f, 1.0f);
+        } else if (post_burn_s < 3.0f) {
+            demanded_pitch_deg = handoff_pitch_deg;
+        } else if (post_burn_s < 5.0f) {
+            demanded_pitch_deg = linear_interpolate(handoff_pitch_deg, normal_pitch_deg, post_burn_s, 3.0f, 5.0f);
+        } else {
+            demanded_pitch_deg = normal_pitch_deg;
+        }
+
+        nav_pitch_cd = constrain_int32(demanded_pitch_deg * 100, min_pitch_cd, max_pitch_cd);
+        TECS_controller.set_pitch_min(0.01f * nav_pitch_cd);
+        TECS_controller.set_pitch_max(0.01f * nav_pitch_cd);
+        return;
+    }
+
     // First see if TKOFF_ROTATE_SPD applies.
     // This will set the pitch for the first portion of the takeoff, up until cruise speed is reached.
     if (!auto_state.rotation_complete && g.takeoff_rotate_speed > 0) {
