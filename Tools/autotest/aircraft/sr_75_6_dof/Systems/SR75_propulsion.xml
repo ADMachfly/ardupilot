@@ -26,6 +26,18 @@
     <priority>2</priority>
   </tank>
 
+  <!-- Dry booster ballast/ejection mass. This tank is not referenced by any engine feed. -->
+  <tank type="FUEL" name="rato_dry_booster_ballast">
+    <location unit="M">
+      <x>-0.60</x>
+      <y>0.0</y>
+      <z>-0.10</z>
+    </location>
+    <capacity unit="LBS">22.046226</capacity>
+    <contents unit="LBS">22.046226</contents>
+    <priority>99</priority>
+  </tank>
+
   <!-- Left turbojet engine. -->
   <engine file="SR75_Turbojet">
     <feed>0</feed>

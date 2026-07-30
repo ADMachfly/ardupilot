@@ -44,6 +44,7 @@ MIN_OUTGOING_TIMESTAMP_STEP_S = 1.0e-6
 FT_TO_M = 0.3048
 FPS_TO_MPS = 0.3048
 KTS_TO_MPS = 0.514444
+SR75_DRY_BOOSTER_WEIGHT_LBS = 22.046226
 
 SERVO16_MAGIC = 18458
 SERVO32_MAGIC = 29569
@@ -95,6 +96,7 @@ LOG_FIELDS = [
     "act_throttle_right_norm",
     "act_turbojet_throttle_norm",
     "act_rato_norm",
+    "act_eject_norm",
     "act_stale",
     "act_warnings",
     "pwm1",
@@ -115,6 +117,8 @@ LOG_FIELDS = [
     "jsbsim_throttle_value",
     "jsbsim_rato_property",
     "jsbsim_rato_value",
+    "jsbsim_dry_booster_property",
+    "jsbsim_dry_booster_value",
     "control_phase",
     "precontrol_active",
     "first_valid_pwm_seen",
@@ -125,6 +129,7 @@ LOG_FIELDS = [
     "rudder_cmd",
     "turbojet_throttle_cmd",
     "rato_cmd",
+    "eject_cmd",
     "p_rad_s",
     "q_rad_s",
     "r_rad_s",
@@ -662,6 +667,7 @@ def make_log_row(
     request_received_host_time: Optional[float] = None,
     pwm_frame_received_host_time: Optional[float] = None,
     reply_send_host_time: Optional[float] = None,
+    dry_booster_attached: bool = True,
 ) -> Dict[str, object]:
     now = time.monotonic()
     request_host_dt = (
@@ -717,6 +723,8 @@ def make_log_row(
         "reply_bytes": reply_bytes,
         "round_trip_or_processing_us": int((now - started) * 1000000.0),
         "error_reason": error_reason,
+        "jsbsim_dry_booster_property": "propulsion/tank[2]/contents-lbs",
+        "jsbsim_dry_booster_value": f"{SR75_DRY_BOOSTER_WEIGHT_LBS if dry_booster_attached else 0.0:.6f}",
     }
     if actuator_command is not None:
         row.update(actuator_command.log_fields())
@@ -725,6 +733,7 @@ def make_log_row(
         row["rudder_cmd"] = f"{actuator_command.rudder:.6f}"
         row["turbojet_throttle_cmd"] = f"{actuator_command.turbojet_throttle:.6f}"
         row["rato_cmd"] = f"{actuator_command.rato:.6f}"
+        row["eject_cmd"] = f"{actuator_command.eject:.6f}"
     if control_packet is not None:
         for index, pwm in enumerate(control_packet.pwm[:8], start=1):
             row[f"pwm{index}"] = pwm
@@ -1377,6 +1386,7 @@ class B3PrecontrolReference:
     rudder: float = 0.0
     turbojet_throttle: float = 0.55
     rato: float = 0.0
+    eject: float = 0.0
 
     def as_command(self) -> NormalizedActuatorCommand:
         return NormalizedActuatorCommand(
@@ -1390,6 +1400,7 @@ class B3PrecontrolReference:
             throttle_right=self.turbojet_throttle,
             turbojet_throttle=self.turbojet_throttle,
             rato=self.rato,
+            eject=self.eject,
             stale=False,
         )
 
@@ -1778,6 +1789,7 @@ class B3StartupSync:
 def jsbsim_command_from_actuator(
     actuator_command: NormalizedActuatorCommand,
     timestamp_s: Optional[float] = None,
+    dry_booster_attached: bool = True,
 ) -> JSBSimActuatorCommand:
     timestamp = time.monotonic() if timestamp_s is None else timestamp_s
     return JSBSimActuatorCommand(
@@ -1787,8 +1799,27 @@ def jsbsim_command_from_actuator(
         rudder=actuator_command.rudder,
         turbojet_throttle=actuator_command.turbojet_throttle,
         rato_throttle=actuator_command.rato,
+        dry_booster_weight_lbs=SR75_DRY_BOOSTER_WEIGHT_LBS if dry_booster_attached else 0.0,
         stale=actuator_command.stale,
     )
+
+
+class SR75DryBoosterEjectionLatch:
+    def __init__(self, attached_weight_lbs: float = SR75_DRY_BOOSTER_WEIGHT_LBS):
+        self.attached_weight_lbs = attached_weight_lbs
+        self.attached = True
+        self.eject_count = 0
+
+    @property
+    def dry_booster_weight_lbs(self) -> float:
+        return self.attached_weight_lbs if self.attached else 0.0
+
+    def update(self, act_eject_norm: float) -> bool:
+        if act_eject_norm > 0.5 and self.attached:
+            self.attached = False
+            self.eject_count += 1
+            return True
+        return False
 
 
 def wait_for_reply_slot(last_reply_mono: float, min_interval: float) -> bool:
@@ -1974,6 +2005,7 @@ def main() -> int:
     startup_scoring_debug_logged = 0
     b3_guard_phase = "NORMAL"
     post_rato_coast_start_timestamp: Optional[float] = None
+    dry_booster_latch = SR75DryBoosterEjectionLatch()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -1999,7 +2031,11 @@ def main() -> int:
                     if precontrol.enabled and precontrol.phase == B3ControlPhase.PRECONTROL_HOLD:
                         assert precontrol_reference is not None
                         command_sink.send(
-                            jsbsim_command_from_actuator(precontrol_reference.as_command(), timestamp_s=started)
+                            jsbsim_command_from_actuator(
+                                precontrol_reference.as_command(),
+                                timestamp_s=started,
+                                dry_booster_attached=dry_booster_latch.attached,
+                            )
                         )
                         if args.verbose:
                             print(
@@ -2011,7 +2047,10 @@ def main() -> int:
                     else:
                         actuator_command = actuator_bridge.current_command(started)
                         if actuator_command.stale:
-                            sent = command_sink.send_stale_once(timestamp_s=started)
+                            sent = command_sink.send_stale_once(
+                                timestamp_s=started,
+                                dry_booster_weight_lbs=dry_booster_latch.dry_booster_weight_lbs,
+                            )
                             if args.verbose and sent is not None:
                                 print("JSBSIM_COMMAND stale=1 elev=0.000 ail=0.000 rud=0.000 thr=0.000 rato=0.000")
                 continue
@@ -2034,7 +2073,11 @@ def main() -> int:
                 if command_sink is not None and precontrol.enabled and precontrol.phase == B3ControlPhase.PRECONTROL_HOLD:
                     assert precontrol_reference is not None
                     command_sink.send(
-                        jsbsim_command_from_actuator(precontrol_reference.as_command(), timestamp_s=started)
+                        jsbsim_command_from_actuator(
+                            precontrol_reference.as_command(),
+                            timestamp_s=started,
+                            dry_booster_attached=dry_booster_latch.attached,
+                        )
                     )
                     malformed_command_source = B3CommandSource.PRECONTROL_REFERENCE
                 write_log(
@@ -2053,6 +2096,7 @@ def main() -> int:
                         timing_gate=timing_gate,
                         previous_request_received_host_time=request_previous_host_time,
                         request_received_host_time=request_received_host_time,
+                        dry_booster_attached=dry_booster_latch.attached,
                     ),
                 )
                 if args.once:
@@ -2108,6 +2152,14 @@ def main() -> int:
                 )
                 precontrol.transition_reported = True
 
+            if dry_booster_latch.update(actuator_command.eject):
+                print(
+                    "SR75_DRY_BOOSTER_EJECT "
+                    f"request={request_count} host_time={started:.9f} "
+                    f"act_eject={actuator_command.eject:.3f} "
+                    f"dry_booster_weight_lbs=0.000000 eject_count={dry_booster_latch.eject_count}"
+                )
+
             startup_sync.maybe_release(
                 raw_decoded_command=raw_decoded_command,
                 channel_map=actuator_channel_map,
@@ -2131,7 +2183,13 @@ def main() -> int:
 
             if command_sink is not None:
                 try:
-                    command_sink.send(jsbsim_command_from_actuator(actuator_command, timestamp_s=started))
+                    command_sink.send(
+                        jsbsim_command_from_actuator(
+                            actuator_command,
+                            timestamp_s=started,
+                            dry_booster_attached=dry_booster_latch.attached,
+                        )
+                    )
                     if args.verbose:
                         print(
                             "JSBSIM_COMMAND "
@@ -2139,7 +2197,9 @@ def main() -> int:
                             f"stale={int(actuator_command.stale)} "
                             f"elev={actuator_command.elevator:.3f} ail={actuator_command.aileron:.3f} "
                             f"rud={actuator_command.rudder:.3f} "
-                            f"thr={actuator_command.turbojet_throttle:.3f} rato={actuator_command.rato:.3f}"
+                            f"thr={actuator_command.turbojet_throttle:.3f} rato={actuator_command.rato:.3f} "
+                            f"eject={actuator_command.eject:.3f} "
+                            f"dry_booster_lbs={dry_booster_latch.dry_booster_weight_lbs:.6f}"
                         )
                 except JSBSimCommandError as exc:
                     actuator_reason = f"JSBSIM_COMMAND_ERROR: {exc}"
@@ -2158,7 +2218,8 @@ def main() -> int:
                     f"elev={actuator_command.elevator:.3f} ail={actuator_command.aileron:.3f} "
                     f"rud={actuator_command.rudder:.3f} "
                     f"thr_l={actuator_command.throttle_left:.3f} thr_r={actuator_command.throttle_right:.3f} "
-                    f"rato={actuator_command.rato:.3f} stale={int(actuator_command.stale)}{warnings}"
+                    f"rato={actuator_command.rato:.3f} eject={actuator_command.eject:.3f} "
+                    f"stale={int(actuator_command.stale)}{warnings}"
                 )
 
             previous_sent_timestamp = mapper.last_outgoing_timestamp
@@ -2274,7 +2335,11 @@ def main() -> int:
                 if command_sink is not None:
                     try:
                         command_sink.send(
-                            jsbsim_command_from_actuator(NormalizedActuatorCommand.neutral(), timestamp_s=started)
+                            jsbsim_command_from_actuator(
+                                NormalizedActuatorCommand.neutral(),
+                                timestamp_s=started,
+                                dry_booster_attached=dry_booster_latch.attached,
+                            )
                         )
                         print("B3_TIME_DISCONTINUITY_ABORT neutral_jsbsim_command_sent=1")
                     except JSBSimCommandError as command_exc:
@@ -2300,6 +2365,7 @@ def main() -> int:
                         previous_request_received_host_time=request_previous_host_time,
                         request_received_host_time=request_received_host_time,
                         pwm_frame_received_host_time=request_received_host_time,
+                        dry_booster_attached=dry_booster_latch.attached,
                     ),
                 )
                 return 4
@@ -2311,7 +2377,11 @@ def main() -> int:
                 if command_sink is not None:
                     try:
                         command_sink.send(
-                            jsbsim_command_from_actuator(NormalizedActuatorCommand.neutral(), timestamp_s=started)
+                            jsbsim_command_from_actuator(
+                                NormalizedActuatorCommand.neutral(),
+                                timestamp_s=started,
+                                dry_booster_attached=dry_booster_latch.attached,
+                            )
                         )
                         print("B3_STATE_ENVELOPE_ABORT neutral_jsbsim_command_sent=1")
                     except JSBSimCommandError as command_exc:
@@ -2339,6 +2409,7 @@ def main() -> int:
                         previous_request_received_host_time=request_previous_host_time,
                         request_received_host_time=request_received_host_time,
                         pwm_frame_received_host_time=request_received_host_time,
+                        dry_booster_attached=dry_booster_latch.attached,
                     ),
                 )
                 return 3
@@ -2371,6 +2442,7 @@ def main() -> int:
                         previous_request_received_host_time=request_previous_host_time,
                         request_received_host_time=request_received_host_time,
                         pwm_frame_received_host_time=request_received_host_time,
+                        dry_booster_attached=dry_booster_latch.attached,
                     ),
                 )
                 if args.once:
@@ -2435,6 +2507,7 @@ def main() -> int:
                     request_received_host_time=request_received_host_time,
                     pwm_frame_received_host_time=request_received_host_time,
                     reply_send_host_time=reply_send_host_time if not args.dry_run else None,
+                    dry_booster_attached=dry_booster_latch.attached,
                 ),
             )
             if args.once:

@@ -53,6 +53,7 @@ cat > "${RUNSCRIPT}" <<EOF
     <property>fcs/rudder-cmd-norm</property>
     <property>fcs/turbojet-throttle-cmd-norm</property>
     <property>fcs/rato-throttle-cmd-norm</property>
+    <property>propulsion/tank[2]/contents-lbs</property>
   </input>
 
   <run start="0.0" end="${JSBSIM_END}" dt="0.008333">
@@ -107,6 +108,12 @@ cat > "${RUNSCRIPT}" <<EOF
     <property>propulsion/engine[0]/thrust-lbs</property>
     <property>propulsion/engine[1]/thrust-lbs</property>
     <property>propulsion/engine[2]/thrust-lbs</property>
+    <property>propulsion/tank[2]/contents-lbs</property>
+    <property>inertia/mass-slugs</property>
+    <property>inertia/cg-x-in</property>
+    <property>inertia/cg-y-in</property>
+    <property>inertia/cg-z-in</property>
+    <property>inertia/iyy-slugs_ft2</property>
   </output>
 </runscript>
 EOF

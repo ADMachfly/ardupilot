@@ -31,6 +31,7 @@ DEFAULT_CHANNELS = {
     "throttle_left": 3,
     "throttle_right": 3,
     "rato": 7,
+    "eject": 8,
 }
 
 JSBSIM_PROPERTIES = {
@@ -39,6 +40,7 @@ JSBSIM_PROPERTIES = {
     "rudder": "fcs/rudder-cmd-norm",
     "turbojet_throttle": "fcs/turbojet-throttle-cmd-norm",
     "rato_throttle": "fcs/rato-throttle-cmd-norm",
+    "dry_booster_weight": "propulsion/tank[2]/contents-lbs",
 }
 
 
@@ -64,7 +66,7 @@ def normalize_throttle_pwm(pwm: int, deadband: float = DEFAULT_THROTTLE_DEADBAND
 
 def neutral_pwm_values(channel_count: int = 16) -> List[int]:
     pwm = [PWM_NEUTRAL] * channel_count
-    for name in ("throttle_left", "throttle_right", "rato"):
+    for name in ("throttle_left", "throttle_right", "rato", "eject"):
         channel = DEFAULT_CHANNELS[name]
         if channel <= channel_count:
             pwm[channel - 1] = PWM_LOW
@@ -74,12 +76,13 @@ def neutral_pwm_values(channel_count: int = 16) -> List[int]:
 @dataclass(frozen=True)
 class ActuatorChannelMap:
     channels: Dict[str, int] = field(default_factory=lambda: dict(DEFAULT_CHANNELS))
-    optional_roles: Tuple[str, ...] = field(default_factory=tuple)
+    optional_roles: Tuple[str, ...] = field(default_factory=lambda: ("eject",))
     timeout_ms: float = DEFAULT_TIMEOUT_MS
     surface_deadband: float = DEFAULT_SURFACE_DEADBAND
     throttle_deadband: float = DEFAULT_THROTTLE_DEADBAND
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "optional_roles", tuple(sorted(set(self.optional_roles) | {"eject"})))
         missing = set(DEFAULT_CHANNELS) - set(self.channels)
         if missing:
             raise ActuatorMapError(f"missing channel roles: {','.join(sorted(missing))}")
@@ -115,7 +118,7 @@ class ActuatorChannelMap:
                 raise ActuatorMapError(f"unknown channel role: {name}")
             channels[name] = _parse_channel(name, channel)
 
-        optional_roles = _parse_optional_roles(data)
+        optional_roles = tuple(sorted(set(_parse_optional_roles(data)) | {"eject"}))
         timeout_ms = _parse_float(data, "timeout_ms", DEFAULT_TIMEOUT_MS)
         surface_deadband = _parse_float(data, "surface_deadband", DEFAULT_SURFACE_DEADBAND)
         throttle_deadband = _parse_float(data, "throttle_deadband", DEFAULT_THROTTLE_DEADBAND)
@@ -180,7 +183,8 @@ class NormalizedActuatorCommand:
     throttle_right: float
     turbojet_throttle: float
     rato: float
-    stale: bool
+    eject: float = 0.0
+    stale: bool = False
     warnings: Tuple[str, ...] = ()
 
     @classmethod
@@ -196,6 +200,7 @@ class NormalizedActuatorCommand:
             throttle_right=0.0,
             turbojet_throttle=0.0,
             rato=0.0,
+            eject=0.0,
             stale=True,
         )
 
@@ -210,6 +215,7 @@ class NormalizedActuatorCommand:
             "act_throttle_right_norm": f"{self.throttle_right:.6f}",
             "act_turbojet_throttle_norm": f"{self.turbojet_throttle:.6f}",
             "act_rato_norm": f"{self.rato:.6f}",
+            "act_eject_norm": f"{self.eject:.6f}",
             "act_stale": int(self.stale),
             "act_warnings": ";".join(self.warnings),
             "jsbsim_elevator_property": JSBSIM_PROPERTIES["elevator"],
@@ -244,9 +250,19 @@ class SoftwareActuatorBridge:
             channel = self.channel_map.channels[name]
             if self.channel_map.role_is_optional(name) and channel > len(pwm):
                 return PWM_LOW
-            if self.channel_map.role_is_optional(name) and int(pwm[channel - 1]) == 0:
+            raw_pwm = pwm[channel - 1]
+            if self.channel_map.role_is_optional(name) and raw_pwm == 0:
                 return PWM_LOW
-            return int(pwm[self.channel_map.channels[name] - 1])
+            if isinstance(raw_pwm, bool) or not isinstance(raw_pwm, int):
+                if name in ("throttle_left", "throttle_right", "rato", "eject"):
+                    return PWM_LOW
+                return PWM_NEUTRAL
+            return int(raw_pwm)
+
+        def packet_pwm_value(value: object) -> int:
+            if isinstance(value, bool) or not isinstance(value, int):
+                return 0
+            return int(value)
 
         left = normalize_surface_pwm(channel_pwm("left_elevon"), self.channel_map.surface_deadband)
         right = normalize_surface_pwm(channel_pwm("right_elevon"), self.channel_map.surface_deadband)
@@ -254,12 +270,13 @@ class SoftwareActuatorBridge:
         throttle_left = normalize_throttle_pwm(channel_pwm("throttle_left"), self.channel_map.throttle_deadband)
         throttle_right = normalize_throttle_pwm(channel_pwm("throttle_right"), self.channel_map.throttle_deadband)
         rato = normalize_throttle_pwm(channel_pwm("rato"), self.channel_map.throttle_deadband)
+        eject = normalize_throttle_pwm(channel_pwm("eject"), self.channel_map.throttle_deadband)
 
         elevator = clamp((left + right) * 0.5, -1.0, 1.0)
         aileron = clamp((left - right) * 0.5, -1.0, 1.0)
         turbojet_throttle = clamp((throttle_left + throttle_right) * 0.5, 0.0, 1.0)
         command = NormalizedActuatorCommand(
-            pwm=tuple(int(value) for value in pwm),
+            pwm=tuple(packet_pwm_value(value) for value in pwm),
             left_elevon=left,
             right_elevon=right,
             elevator=elevator,
@@ -269,6 +286,7 @@ class SoftwareActuatorBridge:
             throttle_right=throttle_right,
             turbojet_throttle=turbojet_throttle,
             rato=rato,
+            eject=eject,
             stale=False,
             warnings=tuple(warnings),
         )

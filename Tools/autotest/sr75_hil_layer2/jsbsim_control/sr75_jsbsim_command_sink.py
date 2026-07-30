@@ -20,6 +20,7 @@ JSBSIM_INPUT_PROPERTIES = (
     "fcs/rudder-cmd-norm",
     "fcs/turbojet-throttle-cmd-norm",
     "fcs/rato-throttle-cmd-norm",
+    "propulsion/tank[2]/contents-lbs",
 )
 
 
@@ -59,12 +60,18 @@ class JSBSimActuatorCommand:
     rudder: float
     turbojet_throttle: float
     rato_throttle: float
+    dry_booster_weight_lbs: float = 22.046226
     stale: bool = False
 
     @classmethod
-    def neutral(cls, timestamp_s: Optional[float] = None, stale: bool = True) -> "JSBSimActuatorCommand":
+    def neutral(
+        cls,
+        timestamp_s: Optional[float] = None,
+        stale: bool = True,
+        dry_booster_weight_lbs: float = 22.046226,
+    ) -> "JSBSimActuatorCommand":
         timestamp = time.monotonic() if timestamp_s is None else timestamp_s
-        return cls(timestamp, 0.0, 0.0, 0.0, 0.0, 0.0, stale)
+        return cls(timestamp, 0.0, 0.0, 0.0, 0.0, 0.0, dry_booster_weight_lbs, stale)
 
     def validated(self) -> "JSBSimActuatorCommand":
         values = (
@@ -74,6 +81,7 @@ class JSBSimActuatorCommand:
             self.rudder,
             self.turbojet_throttle,
             self.rato_throttle,
+            self.dry_booster_weight_lbs,
         )
         if not all(math.isfinite(value) for value in values):
             raise JSBSimCommandError("JSBSim command contains non-finite values")
@@ -86,10 +94,11 @@ class JSBSimActuatorCommand:
             rudder=clamp(self.rudder, SURFACE_LOW, SURFACE_HIGH),
             turbojet_throttle=clamp(self.turbojet_throttle, THROTTLE_LOW, THROTTLE_HIGH),
             rato_throttle=clamp(self.rato_throttle, THROTTLE_LOW, THROTTLE_HIGH),
+            dry_booster_weight_lbs=clamp(self.dry_booster_weight_lbs, 0.0, 22.046226),
             stale=self.stale,
         )
 
-    def packet_values(self) -> Tuple[float, float, float, float, float, float]:
+    def packet_values(self) -> Tuple[float, float, float, float, float, float, float]:
         command = self.validated()
         return (
             command.timestamp_s,
@@ -98,6 +107,7 @@ class JSBSimActuatorCommand:
             command.rudder,
             command.turbojet_throttle,
             command.rato_throttle,
+            command.dry_booster_weight_lbs,
         )
 
     def packet_text(self) -> str:
@@ -128,6 +138,7 @@ class UDPJSBSimCommandSink:
             rudder=command.rudder,
             turbojet_throttle=command.turbojet_throttle,
             rato_throttle=command.rato_throttle,
+            dry_booster_weight_lbs=command.dry_booster_weight_lbs,
             stale=command.stale,
         )
 
@@ -138,7 +149,17 @@ class UDPJSBSimCommandSink:
         self._last_sent_stale = command.stale
         return sent
 
-    def send_stale_once(self, timestamp_s: Optional[float] = None) -> Optional[int]:
+    def send_stale_once(
+        self,
+        timestamp_s: Optional[float] = None,
+        dry_booster_weight_lbs: float = 22.046226,
+    ) -> Optional[int]:
         if self._last_sent_stale:
             return None
-        return self.send(JSBSimActuatorCommand.neutral(timestamp_s=timestamp_s, stale=True))
+        return self.send(
+            JSBSimActuatorCommand.neutral(
+                timestamp_s=timestamp_s,
+                stale=True,
+                dry_booster_weight_lbs=dry_booster_weight_lbs,
+            )
+        )

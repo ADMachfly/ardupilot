@@ -63,15 +63,7 @@
       <z>-0.04</z>
     </location>
 
-    <!-- Static attached booster mass placeholder. RATO propellant is fuel tank mass only. -->
-    <pointmass name="RATO_BOOSTER_DRY_AND_CASE">
-      <weight unit="KG">10.0</weight>
-      <location unit="M">
-        <x>-0.60</x>
-        <y>0.0</y>
-        <z>-0.10</z>
-      </location>
-    </pointmass>
+    <!-- RATO dry booster mass is a dynamic non-feed ballast tank in SR75_propulsion.xml. -->
   </mass_balance>
 
   <propulsion file="Systems/SR75_propulsion.xml"/>
