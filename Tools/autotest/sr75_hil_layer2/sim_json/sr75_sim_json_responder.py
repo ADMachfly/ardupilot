@@ -1248,6 +1248,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--precontrol-rato", type=float, default=0.0, help="Pre-control hold RATO throttle command")
     parser.add_argument(
+        "--auto-gate-hold",
+        action="store_true",
+        help=(
+            "SR-75 F21-K only: keep sending the fixed --precontrol-* reference as the single "
+            "JSBSim-bound command (overriding whatever live PWM decodes to, even after "
+            "precontrol/startup-sync would normally release) until --auto-gate-release-file "
+            "appears on disk. Intended to keep FBWA-driven live commands out of JSBSim until "
+            "the external caller (which watches ArduPlane's MAVLink MODE) confirms AUTO is "
+            "active. Does not change behavior unless this flag is passed. Uses the single "
+            "existing command_sink -- no second command source, unlike the disabled F21-J gate."
+        ),
+    )
+    parser.add_argument(
+        "--auto-gate-release-file",
+        type=str,
+        default=None,
+        help="Path whose existence releases --auto-gate-hold (created externally once MODE=AUTO is confirmed)",
+    )
+    parser.add_argument(
         "--startup-sync",
         action="store_true",
         help=(
@@ -1937,6 +1956,25 @@ def main() -> int:
     )
     precontrol = B3PrecontrolHandover(precontrol_reference)
 
+    # F21-K: separate, single-source command gate. Unlike the disabled F21-J
+    # approach (a second UDP sender racing this responder's own packets into
+    # JSBSim, which corrupted the RATO burn and induced tumbling), this gate
+    # overrides the outgoing actuator_command in-place, right before the one
+    # existing command_sink.send() call below -- there is still only ever
+    # one JSBSim-bound command source. Independent of --precontrol-hold /
+    # startup-sync (which release once PWM becomes valid, long before
+    # ArduPlane's flight mode reaches AUTO); this gate instead releases only
+    # when an external caller (which watches ArduPlane's MAVLink MODE)
+    # creates --auto-gate-release-file.
+    auto_gate_reference = B3PrecontrolReference(
+        elevator=args.precontrol_elevator,
+        aileron=args.precontrol_aileron,
+        rudder=args.precontrol_rudder,
+        turbojet_throttle=args.precontrol_throttle,
+        rato=args.precontrol_rato,
+    )
+    auto_gate_released = not args.auto_gate_hold
+
     startup_sync_target = (
         B3StartupSyncTarget(
             roll_deg=args.startup_sync_roll_deg,
@@ -2180,6 +2218,16 @@ def main() -> int:
                     f"pwm1_4={ready['pwm1_4']} "
                     f"readiness_reason='{ready['reason']}'"
                 )
+
+            # F21-K: override only what is actually sent to JSBSim below --
+            # precontrol/startup-sync/dry-booster state above all continue
+            # tracking the real decoded command untouched.
+            if args.auto_gate_hold and not auto_gate_released:
+                if args.auto_gate_release_file and os.path.exists(args.auto_gate_release_file):
+                    auto_gate_released = True
+                    print(f"AUTO_GATE_RELEASED host_time={started:.9f}")
+                else:
+                    actuator_command = auto_gate_reference.as_command()
 
             if command_sink is not None:
                 try:
