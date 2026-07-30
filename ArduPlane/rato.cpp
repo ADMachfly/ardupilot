@@ -16,6 +16,7 @@
 
 #include "rato.h"
 
+#include <AP_Math/AP_Math.h>
 #include <AP_HAL/AP_HAL.h>
 #include <SRV_Channel/SRV_Channel.h>
 #include <GCS_MAVLink/GCS.h>     // ← ADD THIS for gcs()
@@ -131,6 +132,15 @@ const AP_Param::GroupInfo RATOController::var_info[] = {
     // @Values: 0:Envelope,1:Time,2:Hybrid
     // @User: Advanced
     AP_GROUPINFO("REL_MODE", 15, RATOController, release_mode, 1),
+
+    // @Param: EJ_PULSE
+    // @DisplayName: RATO eject pulse duration
+    // @Description: Duration of the one-shot RATO booster ejection output pulse after burnout and release conditions are satisfied
+    // @Range: 0.1 2.0
+    // @Units: s
+    // @Increment: 0.1
+    // @User: Advanced
+    AP_GROUPINFO("EJ_PULSE", 16, RATOController, eject_pulse_s, 0.5f),
     AP_GROUPEND
 };
 
@@ -140,7 +150,11 @@ RATOController::RATOController() :
     launch_alt_m(0.0f),
     last_dist_m(0.0f),
     last_alt_gain_m(0.0f),
-    last_speed_mps(0.0f)
+    last_speed_mps(0.0f),
+    last_roll_deg(0.0f),
+    last_pitch_rate_rad_s(0.0f),
+    ejection_pulsed(false),
+    ejection_pulse_start_ms(0)
 {
     AP_Param::setup_object_defaults(this, var_info);
 
@@ -157,7 +171,12 @@ void RATOController::reset()
     last_dist_m = 0.0f;
     last_alt_gain_m = 0.0f;
     last_speed_mps = 0.0f;
+    last_roll_deg = 0.0f;
+    last_pitch_rate_rad_s = 0.0f;
+    ejection_pulsed = false;
+    ejection_pulse_start_ms = 0;
     set_ignition_output(false);   // ← ADD THIS
+    set_ejection_output(false);
 }
 
 void RATOController::init(const Location& loc, float alt_m)
@@ -179,6 +198,12 @@ void RATOController::init(const Location& loc, float alt_m)
     last_dist_m = 0.0f;
     last_alt_gain_m = 0.0f;
     last_speed_mps = 0.0f;
+    last_roll_deg = 0.0f;
+    last_pitch_rate_rad_s = 0.0f;
+    ejection_pulsed = false;
+    ejection_pulse_start_ms = 0;
+    set_ignition_output(false);
+    set_ejection_output(false);
 
     if (timeout_s.get() > 0.0f && timeout_s.get() <= eject_time_s.get()) {
         gcs().send_text(MAV_SEVERITY_WARNING,
@@ -191,7 +216,7 @@ void RATOController::init(const Location& loc, float alt_m)
     state = State::READY;
 }
 
-bool RATOController::update(float dist_m, float alt_gain_m, float speed_mps)
+bool RATOController::update(float dist_m, float alt_gain_m, float speed_mps, float roll_deg, float pitch_rate_rad_s)
 {
     if (enable.get() <= 0) {
         reset();
@@ -202,6 +227,8 @@ bool RATOController::update(float dist_m, float alt_gain_m, float speed_mps)
     last_dist_m = dist_m;
     last_alt_gain_m = alt_gain_m;
     last_speed_mps = speed_mps;
+    last_roll_deg = roll_deg;
+    last_pitch_rate_rad_s = pitch_rate_rad_s;
 
     gcs().send_text(MAV_SEVERITY_INFO,
                 "RATO state=%s t=%.2f burn=%.2f d=%.1f alt=%.1f spd=%.1f",
@@ -222,6 +249,8 @@ bool RATOController::update(float dist_m, float alt_gain_m, float speed_mps)
                         (double)timeout_s.get());
                         
         state = State::ABORT;
+        set_ignition_output(false);
+        set_ejection_output(false);
         return true;
     }
 
@@ -232,6 +261,7 @@ bool RATOController::update(float dist_m, float alt_gain_m, float speed_mps)
 
 case State::READY:
     set_ignition_output(false);
+    set_ejection_output(false);
 
     // Wait until AUTO takeoff has actually started moving.
     // This prevents RATO burn from expiring before arming/launch.
@@ -247,12 +277,14 @@ case State::READY:
     case State::IGNITION:
     // Later this state will command ignition output channel.    
         set_ignition_output(true);
+        set_ejection_output(false);
         burn_start_ms = AP_HAL::millis();
         state = State::BOOST;
         return false;
 
     case State::BOOST:
         set_ignition_output(true);
+        set_ejection_output(false);
     /*
         Stay in BOOST until burn time is complete.
 
@@ -266,7 +298,8 @@ case State::READY:
         return false;
 
     case State::BURNOUT:
-         set_ignition_output(false);
+        set_ignition_output(false);
+        set_ejection_output(false);
         /*
           Booster burn is complete.
 
@@ -289,27 +322,38 @@ case State::READY:
         // Edits for the JSBSim test The fix makes it wait until release_envelope_met() returns true before moving to EJECT.
 
     case State::ENGINE_TAKEOVER:
-        if (release_condition_met()) {
+        set_ignition_output(false);
+        set_ejection_output(false);
+        if (release_condition_met() && attitude_stable_for_ejection()) {
             state = State::EJECT;
         }
         return false;
 
     case State::EJECT:
-        /*
-          Later this state will command the ejection channel.
-          For now, just mark the RATO sequence complete.
-        */
         set_ignition_output(false);
+        if (!ejection_pulsed) {
+            ejection_pulsed = true;
+            ejection_pulse_start_ms = AP_HAL::millis();
+            set_ejection_output(true);
+            return false;
+        }
+        if ((AP_HAL::millis() - ejection_pulse_start_ms) * 0.001f < MAX(eject_pulse_s.get(), 0.0f)) {
+            set_ejection_output(true);
+            return false;
+        }
+        set_ejection_output(false);
         state = State::COMPLETE;
         return true;
 
     case State::COMPLETE:
     // RATO is complete; mission TAKEOFF may complete.
     set_ignition_output(false);
+    set_ejection_output(false);
     return true;
 
     case State::ABORT:
     set_ignition_output(false);
+    set_ejection_output(false);
     // RATO aborted; caller may fall back to normal takeoff.
     return true;    
     
@@ -349,6 +393,11 @@ bool RATOController::release_condition_met() const
     default:
         return release_time_met();
     }
+}
+
+bool RATOController::attitude_stable_for_ejection() const
+{
+    return fabsf(last_roll_deg) < 10.0f && fabsf(last_pitch_rate_rad_s) < 0.8f;
 }
 
 
@@ -391,6 +440,16 @@ void RATOController::set_ignition_output(bool on)
     // set_output_pwm_chan_timeout() additionally holds override_active=true for the
     // timeout duration, blocking calc_pwm() from recalculating the value.
     // 300 ms >> 100 ms navigate() period, so BOOST stays at 2000 throughout.
+    SRV_Channels::set_output_pwm_chan_timeout(ch - 1, pwm, 300);
+}
+
+void RATOController::set_ejection_output(bool on)
+{
+    const int8_t ch = eject_chan.get();
+    if (ch <= 0) {
+        return;
+    }
+    const uint16_t pwm = on ? 2000 : 1000;
     SRV_Channels::set_output_pwm_chan_timeout(ch - 1, pwm, 300);
 }
 

@@ -62,7 +62,7 @@ public:
     // Reset controller back to disabled state.
     void reset();
     void init(const Location& launch_loc, float launch_alt_m);
-    bool update(float dist_m, float alt_gain_m, float speed_mps);
+    bool update(float dist_m, float alt_gain_m, float speed_mps, float roll_deg, float pitch_rate_rad_s);
 
     bool is_active() const;
     bool is_complete() const;
@@ -96,6 +96,7 @@ public:
     AP_Float    timeout_s;          // RATO_TIMEOUT  overall RATO phase timeout [s]
     AP_Int8     ign_chan;           // RATO_IGN_CH   relay/servo channel for ignition (1-based)
     AP_Int8     eject_chan;         // RATO_EJECT_CH relay/servo channel for ejection (1-based)
+    AP_Float    eject_pulse_s;      // RATO_EJ_PULSE ejection output pulse duration [s]
 
     // ── Public API ────────────────────────────────────────────────────────────
 
@@ -112,6 +113,10 @@ private:
     float last_dist_m;
     float last_alt_gain_m;
     float last_speed_mps;
+    float last_roll_deg;
+    float last_pitch_rate_rad_s;
+    bool ejection_pulsed;
+    uint32_t ejection_pulse_start_ms;
 
     // Seconds since RATO initialisation.
     float elapsed_s() const; 
@@ -121,7 +126,9 @@ private:
     bool release_envelope_met() const;
     bool release_time_met() const;
     bool release_condition_met() const;
+    bool attitude_stable_for_ejection() const;
 
     // Commands ignition servo/relay channel on or off.
     void set_ignition_output(bool on);    // ← ADD THIS LINE
+    void set_ejection_output(bool on);
 };

@@ -655,7 +655,11 @@ bool Plane::verify_takeoff()
         // Later this can be changed to airspeed if airspeed sensor is reliable.
         const float speed_mps = ahrs.groundspeed();
 
-        const bool rato_done = g2.rato.update(dist_m, alt_gain_m, speed_mps);
+        const bool rato_done = g2.rato.update(dist_m,
+                                              alt_gain_m,
+                                              speed_mps,
+                                              ahrs.roll_sensor * 0.01f,
+                                              ahrs.get_gyro().y);
 
         if (g2.rato.is_aborted()) {
             GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "RATO: aborted, falling back to normal takeoff");
