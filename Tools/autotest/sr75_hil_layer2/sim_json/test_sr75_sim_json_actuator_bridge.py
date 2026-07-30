@@ -2,6 +2,7 @@
 # AP_FLAKE8_CLEAN
 """Software-only tests for the SR-75 SIM_JSON actuator decoder."""
 
+import math
 import os
 import unittest
 
@@ -9,6 +10,7 @@ from sr75_sim_json_actuator_bridge import (
     ActuatorChannelMap,
     ActuatorMapError,
     DEFAULT_CHANNELS,
+    JSBSIM_PROPERTIES,
     NormalizedActuatorCommand,
     SoftwareActuatorBridge,
     neutral_pwm_values,
@@ -43,13 +45,18 @@ class TestSR75SIMJSONActuatorBridge(unittest.TestCase):
         self.assertEqual(command.rudder, 0.0)
         self.assertEqual(command.turbojet_throttle, 0.0)
         self.assertEqual(command.rato, 0.0)
+        self.assertEqual(command.eject, 0.0)
 
     def test_documented_channel_map_matches_loaded_map(self):
         map_path = os.path.join(os.path.dirname(__file__), "SR75_SIM_JSON_CHANNEL_MAP.json")
         channel_map = ActuatorChannelMap.from_json_file(map_path)
         self.assertEqual(channel_map.channels, DEFAULT_CHANNELS)
         self.assertEqual(channel_map.channels["rato"], 7)
-        self.assertEqual(channel_map.optional_roles, ())
+        self.assertEqual(channel_map.channels["eject"], 8)
+        self.assertEqual(channel_map.optional_roles, ("eject",))
+
+    def test_dry_booster_uses_writable_ballast_tank_property(self):
+        self.assertEqual(JSBSIM_PROPERTIES["dry_booster_weight"], "propulsion/tank[2]/contents-lbs")
 
     def test_b3_channel_map_marks_rato_optional(self):
         map_path = os.path.join(
@@ -60,7 +67,7 @@ class TestSR75SIMJSONActuatorBridge(unittest.TestCase):
         )
         channel_map = ActuatorChannelMap.from_json_file(map_path)
         self.assertEqual(channel_map.channels, DEFAULT_CHANNELS)
-        self.assertEqual(channel_map.optional_roles, ("rato",))
+        self.assertEqual(channel_map.optional_roles, ("eject", "rato"))
 
     def test_optional_rato_zero_is_off_without_warning(self):
         channel_map = ActuatorChannelMap(channels=DEFAULT_CHANNELS, optional_roles=("rato",))
@@ -79,6 +86,13 @@ class TestSR75SIMJSONActuatorBridge(unittest.TestCase):
             pwm[index] = 0
         command = bridge.update_from_pwm(pwm, now=1.0)
         self.assertEqual(command.warnings, ())
+
+    def test_optional_eject_zero_is_off_without_warning(self):
+        pwm = neutral_pwm()
+        pwm[7] = 0
+        command = self.bridge.update_from_pwm(pwm, now=1.0)
+        self.assertEqual(command.eject, 0.0)
+        self.assertNotIn("ch8:out_of_range:0", command.warnings)
 
     def test_optional_rato_does_not_weaken_strict_map(self):
         pwm = neutral_pwm()
@@ -112,6 +126,7 @@ class TestSR75SIMJSONActuatorBridge(unittest.TestCase):
         self.assertEqual(stale.throttle_left, 0.0)
         self.assertEqual(stale.throttle_right, 0.0)
         self.assertEqual(stale.rato, 0.0)
+        self.assertEqual(stale.eject, 0.0)
 
     def test_single_elevon_response(self):
         pwm = neutral_pwm()
@@ -157,6 +172,28 @@ class TestSR75SIMJSONActuatorBridge(unittest.TestCase):
         pwm[6] = 2000
         command = self.bridge.update_from_pwm(pwm, now=1.0)
         self.assertEqual(command.rato, 1.0)
+
+    def test_eject_simulated_command_response(self):
+        pwm = neutral_pwm()
+        pwm[7] = 2000
+        command = self.bridge.update_from_pwm(pwm, now=1.0)
+        self.assertEqual(command.eject, 1.0)
+        self.assertEqual(command.log_fields()["act_eject_norm"], "1.000000")
+
+    def test_low_eject_pwm_is_off(self):
+        pwm = neutral_pwm()
+        pwm[7] = 1000
+        command = self.bridge.update_from_pwm(pwm, now=1.0)
+        self.assertEqual(command.eject, 0.0)
+
+    def test_malformed_eject_pwm_warns_and_fails_low(self):
+        for malformed in ("bad", math.nan):
+            with self.subTest(malformed=malformed):
+                pwm = neutral_pwm()
+                pwm[7] = malformed
+                command = self.bridge.update_from_pwm(pwm, now=1.0)
+                self.assertEqual(command.eject, 0.0)
+                self.assertIn("ch8:malformed", command.warnings)
 
     def test_no_physical_output_interface(self):
         command = self.bridge.update_from_pwm(neutral_pwm(), now=1.0)

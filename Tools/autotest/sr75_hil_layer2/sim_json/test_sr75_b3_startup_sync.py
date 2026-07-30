@@ -17,9 +17,12 @@ from sr75_sim_json_responder import (
     ControlPacket,
     GRAVITY_MSS,
     SERVO16_MAGIC,
+    SR75_DRY_BOOSTER_WEIGHT_LBS,
+    SR75DryBoosterEjectionLatch,
     StateMapper,
     degrees_to_radians,
     gravity_body_mss,
+    jsbsim_command_from_actuator,
     make_log_row,
     print_b3_startup_scoring_debug,
 )
@@ -630,6 +633,34 @@ class TestB3StartupSync(unittest.TestCase):
         # maybe_release() must be a no-op when disabled.
         sync.maybe_release(raw_invalid, CHANNEL_MAP, host_time=1.0, pwm=raw_invalid.pwm)
         self.assertEqual(sync.release_count, 0)
+
+
+class TestSR75DryBoosterEjection(unittest.TestCase):
+    def test_no_eject_leaves_booster_attached(self):
+        latch = SR75DryBoosterEjectionLatch()
+        self.assertFalse(latch.update(0.0))
+        self.assertTrue(latch.attached)
+        self.assertEqual(latch.eject_count, 0)
+        self.assertEqual(latch.dry_booster_weight_lbs, SR75_DRY_BOOSTER_WEIGHT_LBS)
+
+    def test_first_eject_command_removes_dry_booster_once(self):
+        latch = SR75DryBoosterEjectionLatch()
+        self.assertTrue(latch.update(1.0))
+        self.assertFalse(latch.attached)
+        self.assertEqual(latch.eject_count, 1)
+        self.assertEqual(latch.dry_booster_weight_lbs, 0.0)
+        self.assertFalse(latch.update(1.0))
+        self.assertFalse(latch.update(0.0))
+        self.assertFalse(latch.update(1.0))
+        self.assertEqual(latch.eject_count, 1)
+        self.assertEqual(latch.dry_booster_weight_lbs, 0.0)
+
+    def test_jsbsim_command_uses_current_dry_booster_state(self):
+        command = command_with(eject=1.0)
+        attached = jsbsim_command_from_actuator(command, timestamp_s=1.0, dry_booster_attached=True)
+        ejected = jsbsim_command_from_actuator(command, timestamp_s=1.0, dry_booster_attached=False)
+        self.assertEqual(attached.dry_booster_weight_lbs, SR75_DRY_BOOSTER_WEIGHT_LBS)
+        self.assertEqual(ejected.dry_booster_weight_lbs, 0.0)
 
 
 if __name__ == "__main__":
