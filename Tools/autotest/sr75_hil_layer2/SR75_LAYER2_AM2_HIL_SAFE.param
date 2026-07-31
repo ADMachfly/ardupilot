@@ -1,0 +1,97 @@
+# SR-75 Layer 2 AM2 HIL Bench Parameters (bench-safe)
+#
+# ============================================================================
+# BENCH / HIL ONLY. DO NOT LOAD ON A VEHICLE WITH LIVE HARDWARE.
+#
+# This param set enables ArduPlane's RATO state machine (including the
+# mid-BOOST resume path validated in F22-GZ-AH..AM2 SITL) purely for
+# SOFTWARE/LOGIC validation on a Pixhawk bench. RATO_IGN_CH (7) and
+# RATO_EJ_CH (8) MUST be wired to dummy loads, LEDs, a PWM logger, or left
+# disconnected ONLY. There is:
+#   - NO live engine
+#   - NO live fuel pump
+#   - NO live RATO igniter
+#   - NO live eject/pyro mechanism
+# connected or intended to be connected while this param file is loaded.
+# The RATO state machine will still run (ignition/eject PWM will still be
+# COMMANDED on CH7/CH8, e.g. for PWM-logger readback per HIL-F23-B) -- only
+# the physical actuation is prohibited on this bench, not the software path.
+# ============================================================================
+#
+# Forked from Tools/autotest/sr75_hil_layer2/SR75_LAYER2_HIL.param
+# (that file is left unmodified -- do not overwrite it).
+#
+# HIL-F23-A audit: full AM2 mission-on-hardware is NOT yet validated; this
+# param file only adds the RATO resume parameter set so RATO_RESUME/
+# RATO_RES_BURN can be dry-run/PWM-readback checked ahead of that work.
+
+LOG_DISARMED 1
+LOG_BITMASK 65535
+
+# Airspeed / TECS
+AIRSPEED_MIN 40
+AIRSPEED_MAX 125
+AIRSPEED_CRUISE 69
+TRIM_ARSPD_CM 6900
+SR75_ARSPD_EN 1
+SR75_ATT_EN 1
+
+THR_MIN 0
+THR_MAX 100
+THR_CRUISE 55
+THR_SLEWRATE 30
+
+PTCH_LIM_MAX_DEG 30
+PTCH_LIM_MIN_DEG -20
+LIM_ROLL_CD 4500
+SCALING_SPEED 69
+
+TECS_CLMB_MAX 20
+TECS_SINK_MIN 6
+TECS_SINK_MAX 25
+TECS_TIME_CONST 5.0
+TECS_THR_DAMP 0.8
+TECS_PTCH_DAMP 0.5
+TECS_SPDWEIGHT 1.0
+
+# ----------------------------------------------------------------------------
+# RATO: enabled for software/logic validation only. CH7 (ignition) and CH8
+# (eject) outputs must remain dummy-only on this bench (see banner above).
+# Values below are exactly the set validated end-to-end in SITL through
+# F22-GZ-AM2 (see Tools/autotest/sr75_hil_layer2/closed_loop/
+# sr75_f22gzam2_extended_altitude_profile_v2.py) -- unchanged here so bench
+# behavior matches the already-validated SITL timeline.
+# ----------------------------------------------------------------------------
+RATO_ENABLE 1
+RATO_IGN_CH 7
+RATO_EJ_CH 8
+RATO_BURN_S 3.0
+RATO_PITCH 20.0
+RATO_REL_MODE 1
+RATO_EJECT_S 10.0
+
+# Mid-BOOST resume (F22-GZ-AC/AH..AM2): starts the RATO state machine
+# already in BOOST, seeded with burn_elapsed_s=RATO_RES_BURN instead of
+# igniting from READY. This is the AM2-validated preserved-state handoff
+# value (0.768s elapsed of a 3.0s burn -> ~2.232s remaining). SITL/test-only
+# per rato.h; both default to 0/off upstream, so a normal (non-bench) build
+# is unaffected unless this file is explicitly loaded.
+RATO_RESUME 1
+RATO_RES_BURN 0.768
+
+# Not set here (left at ArduPlane defaults, unused by AM2's REL_MODE=1/TIME
+# release condition, so inert either way): RATO_REL_ALT, RATO_REL_DST,
+# RATO_REL_SPD, RATO_MAX_G, RATO_MIN_G, RATO_THR_N, RATO_MASS. RATO_TMO_S
+# (default 15.0s abort timeout) and RATO_EJ_PULSE (default 0.5s) are also
+# left at defaults -- both matter for full-sequence timing (see
+# RATO_TMO_S note below) but neither requires a bench-specific override.
+#
+# NOTE (carried from F22-GZ-AG/AK SITL runs): RATO_TMO_S=15.0 aborts the
+# whole RATO sequence if it has not reached EJECT within 15s of resume --
+# comfortably longer than the validated ~10.7s resume->eject timeline, but
+# worth knowing if a bench dry-run session is paused/single-stepped for a
+# long time between BOOST and EJECT.
+
+# Safety: keep failsafe actions bench-safe for initial tests
+FS_SHORT_ACTN 0
+FS_LONG_ACTN 0
