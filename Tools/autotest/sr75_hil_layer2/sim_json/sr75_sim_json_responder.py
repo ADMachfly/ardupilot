@@ -1317,6 +1317,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Path whose existence releases --auto-gate-hold (created externally once MODE=AUTO is confirmed)",
     )
     parser.add_argument(
+        "--jsbsim-boot-hold-release-file",
+        type=str,
+        default=None,
+        help=(
+            "F22-GZ-AG: while set, continuously send forces/hold-down=1 as an extra "
+            "wire field on the single JSBSim command (see JSBSimActuatorCommand.hold_down) "
+            "-- clamping JSBSim's rocket-launch-pad hold-down restraint so "
+            "position/attitude stay pinned exactly at the release-state IC while "
+            "ArduPlane boots, instead of the aircraft gliding/diving open-loop with no "
+            "RATO thrust for the ~10-14s boot delay. Requires the runscript's <input> "
+            "property list to include forces/hold-down as its last entry, matching the "
+            "extra field this flag adds. Releases (hold_down=0.0, permanently) once the "
+            "given path exists on disk -- created externally once MODE=AUTO is confirmed, "
+            "same moment RATO ignition begins via --auto-gate-live-rato-eject."
+        ),
+    )
+    parser.add_argument(
         "--startup-sync",
         action="store_true",
         help=(
@@ -1361,6 +1378,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--startup-sync-longitude-deg", type=float, default=74.3661944, help="Startup-sync held longitude"
+    )
+    parser.add_argument(
+        "--startup-sync-force-release-file",
+        type=str,
+        default=None,
+        help=(
+            "F22-GZ-AH: path whose existence forces STARTUP_SYNC_HOLD -> RELEASED "
+            "immediately (via B3StartupSync.force_release()), bypassing the normal "
+            "valid-PWM/FBWA/EKF readiness heuristic. Intended for a harness that "
+            "delays launching the real (release-state-IC) JSBSim process until "
+            "ArduPlane is armed and AUTO -- ArduPlane spends its entire boot seeing "
+            "only the synthetic held_reply_state() (matching the intended release "
+            "IC exactly, including airspeed, since JSBSim never actually diverges "
+            "from it), and only switches to genuine JSBSim state once this file "
+            "appears (created externally once the freshly-launched JSBSim's state "
+            "CSV has real rows). Also resets the --precontrol-burn-duration-s "
+            "reference clock to this same moment instead of responder-process-start, "
+            "since the real burn only begins once JSBSim is actually running."
+        ),
     )
     return parser
 
@@ -1721,6 +1757,27 @@ class B3StartupSync:
         self._release_wall_offset = self._last_hold_timestamp
         self.release_record = {"host_time": host_time}
 
+    def force_release(self, host_time: float) -> None:
+        """F22-GZ-AH: release HOLD -> RELEASED unconditionally, bypassing the
+        valid-PWM/FBWA/EKF readiness heuristic in maybe_release(). Used when
+        an external caller (the harness) has just launched a FRESH JSBSim
+        process at the release-state IC -- e.g. once its state CSV has
+        actual rows -- so ArduPlane should stop seeing the synthetic
+        held_reply_state() and start seeing genuine JSBSim state from that
+        exact moment. Sets _release_wall_offset the same way maybe_release()
+        does, so process_post_release_state()'s timestamp rebasing stays
+        continuous across the hold -> release boundary (no backward jump,
+        no B3_TIME_DISCONTINUITY_ABORT). No-op if already released.
+        """
+        if not self.enabled or self.phase == B3StartupPhase.RELEASED:
+            return
+        self.readiness_reason = "released:external_force_release"
+        self.control_ready_record = {"host_time": host_time, "reason": self.readiness_reason}
+        self.phase = B3StartupPhase.RELEASED
+        self.release_count += 1
+        self._release_wall_offset = self._last_hold_timestamp
+        self.release_record = {"host_time": host_time}
+
     def _bounds_ok(
         self,
         state: SimState,
@@ -1859,6 +1916,7 @@ def jsbsim_command_from_actuator(
     actuator_command: NormalizedActuatorCommand,
     timestamp_s: Optional[float] = None,
     dry_booster_attached: bool = True,
+    hold_down: Optional[float] = None,
 ) -> JSBSimActuatorCommand:
     timestamp = time.monotonic() if timestamp_s is None else timestamp_s
     return JSBSimActuatorCommand(
@@ -1870,6 +1928,7 @@ def jsbsim_command_from_actuator(
         rato_throttle=actuator_command.rato,
         dry_booster_weight_lbs=SR75_DRY_BOOSTER_WEIGHT_LBS if dry_booster_attached else 0.0,
         stale=actuator_command.stale,
+        hold_down=hold_down,
     )
 
 
@@ -2015,6 +2074,18 @@ def main() -> int:
     postburn_reference = None
     burn_phase_switch_done = False
     responder_start_monotonic = time.monotonic()
+    # F22-GZ-AH: when --startup-sync-force-release-file is used, the real
+    # (release-state-IC) JSBSim process is launched well after this
+    # responder starts (it services ArduPlane's boot via the synthetic
+    # held_reply_state() with no live JSBSim at all), so the burn-duration
+    # clock must be anchored to the force-release moment, not
+    # responder_start_monotonic -- otherwise --precontrol-burn-duration-s
+    # would already have elapsed (switching to postburn values) before
+    # JSBSim even exists. None here means "not yet anchored"; the main loop
+    # sets it the moment force_release() fires.
+    burn_phase_reference_monotonic = (
+        None if args.startup_sync_force_release_file else responder_start_monotonic
+    )
     if args.precontrol_hold and args.precontrol_burn_duration_s > 0:
         postburn_reference = B3PrecontrolReference(
             elevator=args.precontrol_postburn_elevator if args.precontrol_postburn_elevator is not None else args.precontrol_elevator,
@@ -2113,6 +2184,7 @@ def main() -> int:
     b3_guard_phase = "NORMAL"
     post_rato_coast_start_timestamp: Optional[float] = None
     dry_booster_latch = SR75DryBoosterEjectionLatch()
+    boot_hold_released = not args.jsbsim_boot_hold_release_file
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -2133,18 +2205,38 @@ def main() -> int:
             started = time.monotonic()
 
             if (
+                args.startup_sync_force_release_file
+                and startup_sync.enabled
+                and startup_sync.phase != B3StartupPhase.RELEASED
+                and os.path.exists(args.startup_sync_force_release_file)
+            ):
+                startup_sync.force_release(started)
+                burn_phase_reference_monotonic = started
+                print(f"STARTUP_SYNC_FORCE_RELEASED host_time={started:.9f}")
+
+            if (
                 postburn_reference is not None
                 and not burn_phase_switch_done
-                and (started - responder_start_monotonic) >= args.precontrol_burn_duration_s
+                and burn_phase_reference_monotonic is not None
+                and (started - burn_phase_reference_monotonic) >= args.precontrol_burn_duration_s
             ):
                 precontrol.reference = postburn_reference
                 burn_phase_switch_done = True
                 print(
                     "PRECONTROL_BURN_PHASE_SWITCH "
-                    f"elapsed_s={started - responder_start_monotonic:.3f} "
+                    f"elapsed_s={started - burn_phase_reference_monotonic:.3f} "
                     f"elev={postburn_reference.elevator:.3f} thr={postburn_reference.turbojet_throttle:.3f} "
                     f"rato={postburn_reference.rato:.3f} eject={postburn_reference.eject:.3f}"
                 )
+
+            if (
+                args.jsbsim_boot_hold_release_file
+                and not boot_hold_released
+                and os.path.exists(args.jsbsim_boot_hold_release_file)
+            ):
+                boot_hold_released = True
+                print(f"JSBSIM_BOOT_HOLD_RELEASED host_time={started:.9f}")
+            hold_down_value = None if not args.jsbsim_boot_hold_release_file else (0.0 if boot_hold_released else 1.0)
 
             try:
                 data, source = sock.recvfrom(4096)
@@ -2157,6 +2249,7 @@ def main() -> int:
                                 precontrol.reference.as_command(),
                                 timestamp_s=started,
                                 dry_booster_attached=dry_booster_latch.attached,
+                                hold_down=hold_down_value,
                             )
                         )
                         if args.verbose:
@@ -2199,6 +2292,7 @@ def main() -> int:
                             precontrol.reference.as_command(),
                             timestamp_s=started,
                             dry_booster_attached=dry_booster_latch.attached,
+                            hold_down=hold_down_value,
                         )
                     )
                     malformed_command_source = B3CommandSource.PRECONTROL_REFERENCE
@@ -2338,6 +2432,7 @@ def main() -> int:
                             actuator_command,
                             timestamp_s=started,
                             dry_booster_attached=dry_booster_latch.attached,
+                            hold_down=hold_down_value,
                         )
                     )
                     if args.verbose:
@@ -2349,7 +2444,8 @@ def main() -> int:
                             f"rud={actuator_command.rudder:.3f} "
                             f"thr={actuator_command.turbojet_throttle:.3f} rato={actuator_command.rato:.3f} "
                             f"eject={actuator_command.eject:.3f} "
-                            f"dry_booster_lbs={dry_booster_latch.dry_booster_weight_lbs:.6f}"
+                            f"dry_booster_lbs={dry_booster_latch.dry_booster_weight_lbs:.6f} "
+                            f"hold_down={hold_down_value}"
                         )
                 except JSBSimCommandError as exc:
                     actuator_reason = f"JSBSIM_COMMAND_ERROR: {exc}"
@@ -2489,6 +2585,7 @@ def main() -> int:
                                 NormalizedActuatorCommand.neutral(),
                                 timestamp_s=started,
                                 dry_booster_attached=dry_booster_latch.attached,
+                                hold_down=hold_down_value,
                             )
                         )
                         print("B3_TIME_DISCONTINUITY_ABORT neutral_jsbsim_command_sent=1")
@@ -2531,6 +2628,7 @@ def main() -> int:
                                 NormalizedActuatorCommand.neutral(),
                                 timestamp_s=started,
                                 dry_booster_attached=dry_booster_latch.attached,
+                                hold_down=hold_down_value,
                             )
                         )
                         print("B3_STATE_ENVELOPE_ABORT neutral_jsbsim_command_sent=1")

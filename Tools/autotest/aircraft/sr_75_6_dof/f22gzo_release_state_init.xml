@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<initialize name="SR75 Layer 2D-F22 43.85 m/s rail-release IC (F22-GZ-P)">
+  <!--
+    F22-GZ-P: same launch site/attitude convention as
+    f22gz_release_state_init.xml (F22-GZ-K/L) and f22gzn_release_state_init.xml
+    (F22-GZ-N), but ubody now set to the ACTUAL measured Gazebo release
+    speed from the low-loss long-rail mechanism (F22-GZ-O: release
+    distance=17.059m, release speed=43.85 m/s, cross drift and attitude
+    both effectively exact), rather than the F22-GZ-N task's forced 45.0
+    m/s target value.
+
+    lat/lon/alt reuse the F22-GZ-K mapping unchanged (no better/updated
+    georeference data exists): 32.5378147/74.3661871/3000.35, offset from
+    the F21/F22 JSBSim launch site via the flat-earth approximation
+    established in F22-GZ-E/K (Gazebo world +Y=North/+X=East). This
+    remains an assumed, not calibrated, correspondence between the two
+    simulators.
+
+    phi/theta/psi = 0/20/315 are the intended physical launch attitude
+    (rail elevation/azimuth), not a raw Gazebo Euler readout; see
+    f22gz_release_state_init.xml for why those differ. p/q/r=0 are
+    inferred from the rail joint's rotation lock (prismatic + fixed
+    DetachableJoint chain permits no relative rotation before detach).
+  -->
+  <latitude unit="DEG">32.5378147</latitude>
+  <longitude unit="DEG">74.3661871</longitude>
+  <altitude unit="M">3000.35</altitude>
+  <ubody unit="M/SEC">43.85</ubody>
+  <vbody unit="M/SEC">0.0</vbody>
+  <wbody unit="M/SEC">0.0</wbody>
+  <psi unit="DEG">315.0</psi>
+  <phi unit="DEG">0.0</phi>
+  <theta unit="DEG">20.0</theta>
+  <p unit="RAD/SEC">0.0</p>
+  <q unit="RAD/SEC">0.0</q>
+  <r unit="RAD/SEC">0.0</r>
+</initialize>

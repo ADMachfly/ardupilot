@@ -62,6 +62,29 @@ class JSBSimActuatorCommand:
     rato_throttle: float
     dry_booster_weight_lbs: float = 22.046226
     stale: bool = False
+    # F22-GZ-AG: optional 8th wire field, mapped to forces/hold-down when the
+    # runscript's <input> property list explicitly includes it (see
+    # sr75_f22gzag_resume_frozen.py). 1.0 clamps JSBSim's rocket-launch-pad
+    # hold-down restraint, pinning position/attitude exactly at the
+    # release-state IC (confirmed empirically: theta stays fixed to within
+    # 1e-7 deg) while ArduPlane boots; 0.0 releases the clamp, at which point
+    # motion resumes from that unchanged attitude/position under whatever
+    # forces are then active (RATO ignition is timed to happen at the same
+    # moment via the existing --auto-gate-live-rato-eject live PWM passthrough,
+    # so the release isn't an unpowered drop). Note hold-down also drives
+    # reported velocity to ~0 while clamped -- this is expected and benign
+    # (ArduPlane's EKF boots against what looks like a stationary aircraft,
+    # its normal condition), not something this field tries to prevent.
+    # simulation/pause and simulation/reset were both tried first and
+    # rejected: pause permanently halts the FDM exec with no way to resume
+    # it externally, and reset (needed to restore velocity RW-only
+    # velocities/*-fps are read-only) exhibits the same unrecoverable halt.
+    # Must stay None (the default) for every other caller/runscript:
+    # JSBSim's UDP input parser hard-rejects any packet whose value count
+    # doesn't exactly match the declared <input> property count ("Mismatch
+    # between UDP input property and value counts"), so
+    # packet_values()/packet_text() only emit this field when set.
+    hold_down: Optional[float] = None
 
     @classmethod
     def neutral(
@@ -74,7 +97,7 @@ class JSBSimActuatorCommand:
         return cls(timestamp, 0.0, 0.0, 0.0, 0.0, 0.0, dry_booster_weight_lbs, stale)
 
     def validated(self) -> "JSBSimActuatorCommand":
-        values = (
+        values = [
             self.timestamp_s,
             self.elevator,
             self.aileron,
@@ -82,7 +105,9 @@ class JSBSimActuatorCommand:
             self.turbojet_throttle,
             self.rato_throttle,
             self.dry_booster_weight_lbs,
-        )
+        ]
+        if self.hold_down is not None:
+            values.append(self.hold_down)
         if not all(math.isfinite(value) for value in values):
             raise JSBSimCommandError("JSBSim command contains non-finite values")
         if self.timestamp_s < 0.0:
@@ -96,11 +121,12 @@ class JSBSimActuatorCommand:
             rato_throttle=clamp(self.rato_throttle, THROTTLE_LOW, THROTTLE_HIGH),
             dry_booster_weight_lbs=clamp(self.dry_booster_weight_lbs, 0.0, 22.046226),
             stale=self.stale,
+            hold_down=None if self.hold_down is None else clamp(self.hold_down, 0.0, 1.0),
         )
 
-    def packet_values(self) -> Tuple[float, float, float, float, float, float, float]:
+    def packet_values(self) -> Tuple[float, ...]:
         command = self.validated()
-        return (
+        values = (
             command.timestamp_s,
             command.elevator,
             command.aileron,
@@ -109,6 +135,9 @@ class JSBSimActuatorCommand:
             command.rato_throttle,
             command.dry_booster_weight_lbs,
         )
+        if command.hold_down is not None:
+            values = values + (command.hold_down,)
+        return values
 
     def packet_text(self) -> str:
         return ",".join(f"{value:.9f}" for value in self.packet_values())
@@ -140,6 +169,7 @@ class UDPJSBSimCommandSink:
             rato_throttle=command.rato_throttle,
             dry_booster_weight_lbs=command.dry_booster_weight_lbs,
             stale=command.stale,
+            hold_down=command.hold_down,
         )
 
     def send(self, command: JSBSimActuatorCommand) -> int:

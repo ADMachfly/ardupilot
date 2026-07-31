@@ -416,8 +416,24 @@ void Plane::do_takeoff(const AP_Mission::Mission_Command& cmd)
         ahrs.get_relative_position_D_home(launch_alt);
         launch_alt = -launch_alt;
 
-        g2.rato.init(launch_loc, launch_alt);
-        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RATO: initialized");
+        // F22-GZ-AC: SITL/test-only mid-BOOST resume path, for continuing a
+        // RATO burn that was partially simulated externally (e.g. a Gazebo
+        // rail launcher) before this JSBSim/ArduPlane instance started.
+        // Normal (real) takeoffs are unaffected: RATO_RESUME defaults to 0,
+        // so this always falls through to the existing init() path below.
+        if (g2.rato.resume_enable.get() > 0) {
+            // launch_loc/launch_alt above are "here, now" -- since the
+            // resumed IC already starts at the true post-rail position,
+            // distance/altitude-gain from this launch reference correctly
+            // start at 0, same as a normal launch's first update() call.
+            g2.rato.resume_boost(launch_loc, launch_alt,
+                                  g2.rato.resume_burn_s.get(),
+                                  0.0f, 0.0f, ahrs.groundspeed());
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RATO: resume path selected");
+        } else {
+            g2.rato.init(launch_loc, launch_alt);
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RATO: initialized");
+        }
     }
 }
 

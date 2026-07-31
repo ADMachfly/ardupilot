@@ -64,6 +64,18 @@ public:
     void init(const Location& launch_loc, float launch_alt_m);
     bool update(float dist_m, float alt_gain_m, float speed_mps, float roll_deg, float pitch_rate_rad_s);
 
+    // F22-GZ-AC: SITL/test-only entry point that starts the state machine
+    // already mid-BOOST, for continuing a RATO burn that was partially
+    // simulated by an external system (e.g. a Gazebo rail launcher) before
+    // JSBSim/ArduPlane picks up. Gated by RATO_RESUME (default 0/off) in
+    // do_takeoff() -- see commands_logic.cpp. Requires burn_elapsed_s <
+    // burn_time; if not satisfied, does nothing (state is left untouched,
+    // caller should fall back to init()). This is NOT meaningful outside
+    // simulation: a real RATO booster cannot be "resumed" after the fact.
+    void resume_boost(const Location& launch_loc, float launch_alt_m,
+                       float burn_elapsed_s, float dist_m, float alt_gain_m,
+                       float speed_mps);
+
     bool is_active() const;
     bool is_complete() const;
     bool is_aborted() const;
@@ -97,6 +109,11 @@ public:
     AP_Int8     ign_chan;           // RATO_IGN_CH   relay/servo channel for ignition (1-based)
     AP_Int8     eject_chan;         // RATO_EJECT_CH relay/servo channel for ejection (1-based)
     AP_Float    eject_pulse_s;      // RATO_EJ_PULSE ejection output pulse duration [s]
+
+    // F22-GZ-AC: SITL/test-only mid-BOOST resume gate. Both default to
+    // off/0 so normal (real) takeoffs are completely unaffected.
+    AP_Int8     resume_enable;      // RATO_RESUME   0=normal init() path, 1=resume_boost() path (SITL/test only)
+    AP_Float    resume_burn_s;      // RATO_RES_BURN burn_elapsed_s to seed when RATO_RESUME=1 [s]
 
     // ── Public API ────────────────────────────────────────────────────────────
 

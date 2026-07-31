@@ -141,6 +141,20 @@ const AP_Param::GroupInfo RATOController::var_info[] = {
     // @Increment: 0.1
     // @User: Advanced
     AP_GROUPINFO("EJ_PULSE", 16, RATOController, eject_pulse_s, 0.5f),
+
+    // @Param: RESUME
+    // @DisplayName: RATO SITL mid-BOOST resume enable
+    // @Description: SITL/test only. When set, do_takeoff() calls resume_boost() instead of init(), starting the RATO state machine already mid-BOOST with RATO_RES_BURN seconds of burn already elapsed. Not meaningful on real hardware -- a real RATO booster cannot be resumed after ignition. Must default to 0.
+    // @Values: 0:Disabled,1:Enabled
+    // @User: Advanced
+    AP_GROUPINFO("RESUME", 17, RATOController, resume_enable, 0),
+
+    // @Param: RES_BURN
+    // @DisplayName: RATO SITL resume burn-elapsed seed
+    // @Description: SITL/test only. Burn time (seconds) already elapsed before resume_boost() is called, e.g. from an external Gazebo rail launch. Only used when RATO_RESUME=1.
+    // @Units: s
+    // @User: Advanced
+    AP_GROUPINFO("RES_BURN", 18, RATOController, resume_burn_s, 0.0f),
     AP_GROUPEND
 };
 
@@ -212,8 +226,69 @@ void RATOController::init(const Location& loc, float alt_m)
                         (double)eject_time_s.get());
     }
      
-    // Enter active state machine.    
+    // Enter active state machine.
     state = State::READY;
+}
+
+// F22-GZ-AC: SITL/test-only. See rato.h for the safety/scope note. Mirrors
+// init()'s job of storing the launch reference and clearing per-run state,
+// but enters directly at State::BOOST with timers back-dated so
+// elapsed_s()/burn_elapsed_s() read as if ignition happened burn_elapsed_s
+// seconds ago, instead of starting the whole READY->IGNITION->BOOST
+// sequence (and its own fresh burn_time.get() window) from zero.
+void RATOController::resume_boost(const Location& loc, float alt_m,
+                                   float burn_elapsed_s_in, float dist_m,
+                                   float alt_gain_m, float speed_mps)
+{
+    if (enable.get() <= 0) {
+        reset();
+        return;
+    }
+
+    // Refuse to resume past the end of the burn; caller should fall back
+    // to init() (or the state machine will reach BURNOUT on its own from a
+    // normal launch). Leaves state untouched -- caller decides fallback.
+    if (burn_elapsed_s_in < 0.0f || burn_elapsed_s_in >= burn_time.get()) {
+        gcs().send_text(MAV_SEVERITY_WARNING,
+                        "RATO resume rejected: burn_elapsed %.2f >= burn_time %.2f",
+                        (double)burn_elapsed_s_in,
+                        (double)burn_time.get());
+        return;
+    }
+
+    // Store launch reference (same job as init()).
+    launch_location = loc;
+    launch_alt_m = alt_m;
+
+    // Seed measured values so envelope/abort checks see real numbers on
+    // the very first update() call, not stale zeros.
+    last_dist_m = dist_m;
+    last_alt_gain_m = alt_gain_m;
+    last_speed_mps = speed_mps;
+    last_roll_deg = 0.0f;
+    last_pitch_rate_rad_s = 0.0f;
+    ejection_pulsed = false;
+    ejection_pulse_start_ms = 0;
+
+    // Back-date both timers so elapsed_s()/burn_elapsed_s() continue
+    // counting from the correct point rather than restarting at 0. This
+    // does NOT extend RATO_TMO_S's effective window -- elapsed_s() reads
+    // the same "seconds since ignition" a continuous flight would show.
+    const uint32_t now_ms = AP_HAL::millis();
+    const uint32_t burn_elapsed_ms = (uint32_t)(burn_elapsed_s_in * 1000.0f);
+    start_ms = now_ms - burn_elapsed_ms;
+    burn_start_ms = now_ms - burn_elapsed_ms;
+
+    // Ignition is already "hot" from the external (Gazebo) boost phase.
+    set_ignition_output(true);
+    set_ejection_output(false);
+
+    state = State::BOOST;
+
+    gcs().send_text(MAV_SEVERITY_INFO,
+                    "RATO: resumed mid-BOOST burn_elapsed=%.2f remaining=%.2f",
+                    (double)burn_elapsed_s_in,
+                    (double)(burn_time.get() - burn_elapsed_s_in));
 }
 
 bool RATOController::update(float dist_m, float alt_gain_m, float speed_mps, float roll_deg, float pitch_rate_rad_s)
