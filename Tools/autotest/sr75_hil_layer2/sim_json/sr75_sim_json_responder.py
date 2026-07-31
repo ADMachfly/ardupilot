@@ -1248,6 +1248,41 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--precontrol-rato", type=float, default=0.0, help="Pre-control hold RATO throttle command")
     parser.add_argument(
+        "--precontrol-eject", type=float, default=0.0,
+        help=(
+            "F22-GZ-Z: pre-control hold eject command. B3PrecontrolReference "
+            "already has an eject field (default 0.0, previously unreachable "
+            "from the CLI); this exposes it so a harness can drive dry-booster "
+            "ejection through SR75DryBoosterEjectionLatch.update() -- the same "
+            "single authoritative path used for the live PWM RATO_EJ_CH case -- "
+            "instead of overriding propulsion/tank[2]/contents-lbs directly in "
+            "a JSBSim runscript, which the responder's own continuous command "
+            "stream would silently overwrite on the very next frame."
+        ),
+    )
+    parser.add_argument(
+        "--precontrol-burn-duration-s", type=float, default=0.0,
+        help=(
+            "F22-GZ-AA: if > 0, this single responder process switches its own "
+            "--precontrol-* reference from the burn-phase values to the "
+            "--precontrol-postburn-* values once this many seconds have "
+            "elapsed since the responder itself started (a proxy for RATO "
+            "ignition time, since this harness's precontrol-hold reference is "
+            "what commands rato-throttle-cmd-norm from t=0). Replaces killing "
+            "and restarting a second responder process (F22-GZ-X), which "
+            "could only react after ArduPlane's multi-second boot/heartbeat "
+            "delay and made the switch fire ~1.8s after true burnout."
+        ),
+    )
+    parser.add_argument("--precontrol-postburn-elevator", type=float, default=None,
+                         help="F22-GZ-AA: elevator after --precontrol-burn-duration-s elapses")
+    parser.add_argument("--precontrol-postburn-throttle", type=float, default=None,
+                         help="F22-GZ-AA: turbojet throttle after --precontrol-burn-duration-s elapses")
+    parser.add_argument("--precontrol-postburn-rato", type=float, default=None,
+                         help="F22-GZ-AA: RATO throttle after --precontrol-burn-duration-s elapses")
+    parser.add_argument("--precontrol-postburn-eject", type=float, default=None,
+                         help="F22-GZ-AA: eject command after --precontrol-burn-duration-s elapses")
+    parser.add_argument(
         "--auto-gate-hold",
         action="store_true",
         help=(
@@ -1950,11 +1985,30 @@ def main() -> int:
             rudder=args.precontrol_rudder,
             turbojet_throttle=args.precontrol_throttle,
             rato=args.precontrol_rato,
+            eject=args.precontrol_eject,
         )
         if args.precontrol_hold
         else None
     )
     precontrol = B3PrecontrolHandover(precontrol_reference)
+
+    # F22-GZ-AA: optional single-process burn -> post-burn phase switch (see
+    # --precontrol-burn-duration-s help above). postburn_reference is only
+    # built if a duration was given; each postburn value falls back to its
+    # burn-phase counterpart if not explicitly overridden, so specifying
+    # only e.g. --precontrol-postburn-eject still works.
+    postburn_reference = None
+    burn_phase_switch_done = False
+    responder_start_monotonic = time.monotonic()
+    if args.precontrol_hold and args.precontrol_burn_duration_s > 0:
+        postburn_reference = B3PrecontrolReference(
+            elevator=args.precontrol_postburn_elevator if args.precontrol_postburn_elevator is not None else args.precontrol_elevator,
+            aileron=args.precontrol_aileron,
+            rudder=args.precontrol_rudder,
+            turbojet_throttle=args.precontrol_postburn_throttle if args.precontrol_postburn_throttle is not None else args.precontrol_throttle,
+            rato=args.precontrol_postburn_rato if args.precontrol_postburn_rato is not None else args.precontrol_rato,
+            eject=args.precontrol_postburn_eject if args.precontrol_postburn_eject is not None else args.precontrol_eject,
+        )
 
     # F21-K: separate, single-source command gate. Unlike the disabled F21-J
     # approach (a second UDP sender racing this responder's own packets into
@@ -2062,15 +2116,30 @@ def main() -> int:
     try:
         while True:
             started = time.monotonic()
+
+            if (
+                postburn_reference is not None
+                and not burn_phase_switch_done
+                and (started - responder_start_monotonic) >= args.precontrol_burn_duration_s
+            ):
+                precontrol.reference = postburn_reference
+                burn_phase_switch_done = True
+                print(
+                    "PRECONTROL_BURN_PHASE_SWITCH "
+                    f"elapsed_s={started - responder_start_monotonic:.3f} "
+                    f"elev={postburn_reference.elevator:.3f} thr={postburn_reference.turbojet_throttle:.3f} "
+                    f"rato={postburn_reference.rato:.3f} eject={postburn_reference.eject:.3f}"
+                )
+
             try:
                 data, source = sock.recvfrom(4096)
             except socket.timeout:
                 if command_sink is not None:
                     if precontrol.enabled and precontrol.phase == B3ControlPhase.PRECONTROL_HOLD:
-                        assert precontrol_reference is not None
+                        assert precontrol.reference is not None
                         command_sink.send(
                             jsbsim_command_from_actuator(
-                                precontrol_reference.as_command(),
+                                precontrol.reference.as_command(),
                                 timestamp_s=started,
                                 dry_booster_attached=dry_booster_latch.attached,
                             )
@@ -2078,9 +2147,9 @@ def main() -> int:
                         if args.verbose:
                             print(
                                 "JSBSIM_COMMAND PRECONTROL_REFERENCE "
-                                f"elev={precontrol_reference.elevator:.3f} ail={precontrol_reference.aileron:.3f} "
-                                f"rud={precontrol_reference.rudder:.3f} thr={precontrol_reference.turbojet_throttle:.3f} "
-                                f"rato={precontrol_reference.rato:.3f}"
+                                f"elev={precontrol.reference.elevator:.3f} ail={precontrol.reference.aileron:.3f} "
+                                f"rud={precontrol.reference.rudder:.3f} thr={precontrol.reference.turbojet_throttle:.3f} "
+                                f"rato={precontrol.reference.rato:.3f}"
                             )
                     else:
                         actuator_command = actuator_bridge.current_command(started)
@@ -2109,10 +2178,10 @@ def main() -> int:
                 print(reason)
                 malformed_command_source = ""
                 if command_sink is not None and precontrol.enabled and precontrol.phase == B3ControlPhase.PRECONTROL_HOLD:
-                    assert precontrol_reference is not None
+                    assert precontrol.reference is not None
                     command_sink.send(
                         jsbsim_command_from_actuator(
-                            precontrol_reference.as_command(),
+                            precontrol.reference.as_command(),
                             timestamp_s=started,
                             dry_booster_attached=dry_booster_latch.attached,
                         )

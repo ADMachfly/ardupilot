@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
 # AP_FLAKE8_CLEAN
-"""F22-GZ-X: post-release partial-RATO/burnout/eject profile through the
-full JSBSim + sr75_sim_json_responder.py + ArduPlane pipeline.
+"""F22-GZ-X/Z/AA: post-release partial-RATO/burnout/eject profile through
+the full JSBSim + sr75_sim_json_responder.py + ArduPlane pipeline.
 
 Starts from the Gazebo release-state IC (f22gzo_release_state_init.xml,
 ubody=43.85 m/s, theta=20deg, psi=315deg) with partial RATO propellant
-(6.83kg, ~2.232s remaining burn) and dry booster attached (10kg). Dry
-booster ejection (tank[2] -> 0 at propellant depletion) is a pure FDM/mass
-event, injected via a JSBSim runscript condition -- it does not compete
-with any live command source.
+(6.83kg, ~2.232s remaining burn) and dry booster attached (10kg).
 
-The elevator/turbojet/RATO schedule (elevator=+0.10 during the burn,
-elevator=0.00 after burnout/eject; turbojet held via the proven responder
-precontrol path, not a bare JSBSim runscript override) is switched by
-running the responder in --precontrol-hold mode and swapping which
-responder process is alive: responder #1 (burn-phase precontrol) is
-killed and responder #2 (post-burn precontrol) started the instant the
-state CSV shows propellant depletion. Only one responder is ever running
-at a time, so this avoids the F21-J dual-command-source hazard (two
-senders racing into the same JSBSim UDP input) while still allowing a
-scheduled precontrol change without editing responder.py or racing a
-second live sender against it.
+F22-GZ-AA: a single responder process is started once, with
+--precontrol-burn-duration-s 2.232 and the --precontrol-postburn-* values
+set. The responder itself switches its live --precontrol-* reference
+(elevator=+0.10/throttle=0.37/rato=1.0/eject=0 -> elevator=0.00/
+throttle=0.37/rato=0.0/eject=1.0) once that many seconds have elapsed
+since it started -- there is no second responder process, no kill/restart,
+and no dependency on ArduPlane's boot/heartbeat timing. This replaces
+F22-GZ-X's kill-responder-#1/start-responder-#2 approach, whose switch
+could only fire after ArduPlane's multi-second boot delay and landed
+~1.8s after true burnout.
+
+Dry-booster ejection is driven through this same single responder path
+(SR75DryBoosterEjectionLatch.update(), via --precontrol-eject), not a
+JSBSim runscript tank[2] override -- the responder's own continuous
+command stream (which writes propulsion/tank[2]/contents-lbs every frame
+based on the latch's attached state) would silently undo a one-shot
+runscript override on the very next frame (F22-GZ-X's original bug).
 """
 import csv
 import os
@@ -45,6 +48,7 @@ POSTBURN_ELEVATOR = 0.00
 TURBOJET_THROTTLE = 0.37  # F21's established cruise value, not a new tuning
 PROP_REMAINING_LBS = 15.057396137417392  # 9.18kg * (2.232/3.0)
 DRY_BOOSTER_LBS = 22.046226               # 10.0kg
+REMAINING_BURN_S = 2.232                  # F22-GZ-M/R: exact remaining-burn time
 
 
 def shell_quiet(cmd):
@@ -114,11 +118,6 @@ def write_files():
       <set name="propulsion/engine[2]/set-running" value="1"/>
       <set name="propulsion/tank[1]/contents-lbs" value="{PROP_REMAINING_LBS}"/>
       <set name="propulsion/tank[2]/contents-lbs" value="{DRY_BOOSTER_LBS}"/>
-      <notify/>
-    </event>
-    <event name="eject_dry_booster" persistent="false">
-      <condition>propulsion/tank[1]/contents-lbs le 0.01</condition>
-      <set name="propulsion/tank[2]/contents-lbs" value="0.0"/>
       <notify/>
     </event>
   </run>
@@ -198,7 +197,7 @@ def tail(path, n=60):
         return ""
 
 
-def responder_cmd(state_csv, channel_map, responder_csv, elevator, throttle, rato):
+def responder_cmd(state_csv, channel_map, responder_csv):
     return [
         "python3", "Tools/autotest/sr75_hil_layer2/sim_json/sr75_sim_json_responder.py",
         "--listen-host", "127.0.0.1", "--listen-port", str(SIM_JSON_PORT),
@@ -215,11 +214,19 @@ def responder_cmd(state_csv, channel_map, responder_csv, elevator, throttle, rat
         "--jsbsim-command-target", f"udp:127.0.0.1:{JSB_PORT}",
         "--rc1-pwm", "1500", "--rc2-pwm", "1500", "--rc3-pwm", "1500", "--rc4-pwm", "1500", "--rc7-pwm", "1000",
         "--precontrol-hold",
-        "--precontrol-elevator", str(elevator),
+        "--precontrol-elevator", str(BURN_ELEVATOR),
         "--precontrol-aileron", "0.0",
         "--precontrol-rudder", "0.0",
-        "--precontrol-throttle", str(throttle),
-        "--precontrol-rato", str(rato),
+        "--precontrol-throttle", str(TURBOJET_THROTTLE),
+        "--precontrol-rato", "1.0",
+        "--precontrol-eject", "0.0",
+        # F22-GZ-AA: single-process phase switch (see module docstring) --
+        # replaces killing/restarting a second responder process.
+        "--precontrol-burn-duration-s", str(REMAINING_BURN_S),
+        "--precontrol-postburn-elevator", str(POSTBURN_ELEVATOR),
+        "--precontrol-postburn-throttle", str(TURBOJET_THROTTLE),
+        "--precontrol-postburn-rato", "0.0",
+        "--precontrol-postburn-eject", "1.0",
     ]
 
 
@@ -252,13 +259,13 @@ def main():
 
         responder_csv = RUN / "responder.csv"
         resp, rf = start(
-            responder_cmd(state_csv, channel_map, responder_csv, BURN_ELEVATOR, TURBOJET_THROTTLE, 1.0),
-            RUN / "responder_burn.log",
+            responder_cmd(state_csv, channel_map, responder_csv),
+            RUN / "responder.log",
         )
         procs.append(resp); files.append(rf)
         time.sleep(0.5)
         if resp.poll() is not None:
-            raise RuntimeError("responder (burn) exited early\n" + tail(RUN / "responder_burn.log"))
+            raise RuntimeError("responder exited early\n" + tail(RUN / "responder.log"))
 
         defaults = ",".join([
             str(REPO / "Tools/autotest/default_params/plane-jsbsim.parm"),
@@ -297,8 +304,11 @@ def main():
             raise RuntimeError("no heartbeat\n" + tail(RUN / "arduplane.log"))
         print("heartbeat_source", hb.get_srcSystem(), hb.get_srcComponent(), "mode", mavutil.mode_string_v10(hb))
 
+        # F22-GZ-AA: no responder restart here -- the single responder
+        # process already switches its own precontrol reference internally
+        # once --precontrol-burn-duration-s elapses (see responder_cmd()).
+        # Just wait out the run, logging mode transitions for reference.
         t_start = time.time()
-        burnout_switched = False
         last_mode = None
         while time.time() - t_start < 30:
             msg = master.recv_match(type=["HEARTBEAT"], blocking=True, timeout=0.2)
@@ -307,33 +317,6 @@ def main():
                 if mode != last_mode:
                     print("mode", mode, "t", time.time() - t_start)
                     last_mode = mode
-
-            if not burnout_switched and state_csv.exists():
-                try:
-                    with state_csv.open() as f:
-                        last_lines = f.readlines()[-3:]
-                    if last_lines:
-                        reader = csv.DictReader([open(state_csv).readline()] + last_lines)
-                        rows = list(reader)
-                        if rows:
-                            prop = g(rows[-1], "tank[1]/contents-lbs")
-                            if prop is not None and prop <= 0.01:
-                                print(f"BURNOUT_DETECTED wall_t={time.time()-t_start:.3f} prop_lbs={prop}")
-                                resp.terminate()
-                                time.sleep(0.3)
-                                resp.kill()
-                                rf.close()
-                                resp2, rf2 = start(
-                                    responder_cmd(state_csv, channel_map, responder_csv, POSTBURN_ELEVATOR, TURBOJET_THROTTLE, 0.0),
-                                    RUN / "responder_postburn.log",
-                                )
-                                procs[1] = resp2
-                                files[1] = rf2
-                                resp, rf = resp2, rf2
-                                burnout_switched = True
-                                print(f"RESPONDER_SWITCHED_TO_POSTBURN wall_t={time.time()-t_start:.3f}")
-                except Exception as e:
-                    print("burnout_poll_error", e)
 
         print("RUN_WINDOW_END")
 
