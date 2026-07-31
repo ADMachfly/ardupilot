@@ -1296,6 +1296,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--auto-gate-live-rato-eject",
+        action="store_true",
+        help=(
+            "F22-GZ-AE: while --auto-gate-hold is overriding elevator/aileron/rudder/"
+            "throttle with the fixed --precontrol-* reference, still pass through the "
+            "LIVE decoded rato/eject fields (from ArduPlane's actual RATO_IGN_CH/"
+            "RATO_EJ_CH PWM) instead of the reference's fixed rato/eject values. Lets "
+            "ArduPlane's own RATOController own RATO ignition/burn/eject timing while "
+            "the harness keeps the airframe's attitude/speed stable via the proven "
+            "precontrol schedule -- no second command source, same single "
+            "command_sink.send() call, just a per-field substitution on the one "
+            "outgoing command."
+        ),
+    )
+    parser.add_argument(
         "--auto-gate-release-file",
         type=str,
         default=None,
@@ -2295,6 +2310,24 @@ def main() -> int:
                 if args.auto_gate_release_file and os.path.exists(args.auto_gate_release_file):
                     auto_gate_released = True
                     print(f"AUTO_GATE_RELEASED host_time={started:.9f}")
+                elif args.auto_gate_live_rato_eject:
+                    # F22-GZ-AE: reuse the same burn/postburn elevator-throttle
+                    # switch built for F22-GZ-AA (postburn_reference is only
+                    # non-None when --precontrol-burn-duration-s was given),
+                    # so the airframe still gets an appropriate attitude/
+                    # throttle reference across the whole (now longer, since
+                    # ArduPlane's own RATO_EJECT_S coast phase follows
+                    # burnout) run -- only rato/eject are live.
+                    base_ref = (
+                        postburn_reference
+                        if (postburn_reference is not None and burn_phase_switch_done)
+                        else auto_gate_reference
+                    )
+                    actuator_command = replace(
+                        base_ref.as_command(),
+                        rato=raw_decoded_command.rato,
+                        eject=raw_decoded_command.eject,
+                    )
                 else:
                     actuator_command = auto_gate_reference.as_command()
 
