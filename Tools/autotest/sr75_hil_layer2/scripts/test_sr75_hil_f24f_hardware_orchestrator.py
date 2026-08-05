@@ -105,5 +105,49 @@ class TestBuildExecutionPlan(unittest.TestCase):
             self.assertNotIn("mission", joined)
 
 
+class TestFeederOutlivesResponder(unittest.TestCase):
+    """HIL-F24-Q: the F24-P hardware run's shutdown-tail misses (requests
+    1489-1499, NO_FRESH_STATE then STALE_STATE) happened because the
+    feeder was given exactly --duration-s and so exited on its own before
+    the orchestrator's own pre-shutdown wait (--duration-s +
+    ORCHESTRATOR_TEST_MARGIN_S) even finished, let alone before the
+    explicit stop-responder-then-feeder sequence ran. These tests pin
+    down the fixed arithmetic: the feeder's own --duration-s must now
+    exceed the orchestrator's full pre-shutdown wait by at least
+    FEEDER_SHUTDOWN_MARGIN_S."""
+
+    def _feeder_duration_s(self, args):
+        plan = orch.build_execution_plan(args)
+        feeder_step = next(s for s in plan if s.name == "start_feeder")
+        duration_flag_index = feeder_step.command.index("--duration-s")
+        return float(feeder_step.command[duration_flag_index + 1])
+
+    def test_feeder_duration_exceeds_orchestrator_wait_by_shutdown_margin(self):
+        args = make_args(duration_s=30.0)
+        feeder_duration_s = self._feeder_duration_s(args)
+        orchestrator_total_wait_s = args.duration_s + orch.ORCHESTRATOR_TEST_MARGIN_S
+        self.assertGreaterEqual(
+            feeder_duration_s - orchestrator_total_wait_s,
+            orch.FEEDER_SHUTDOWN_MARGIN_S,
+        )
+
+    def test_feeder_duration_scales_with_requested_duration(self):
+        short_duration_s = self._feeder_duration_s(make_args(duration_s=10.0))
+        long_duration_s = self._feeder_duration_s(make_args(duration_s=30.0))
+        self.assertAlmostEqual(long_duration_s - short_duration_s, 20.0, places=6)
+
+    def test_shutdown_stops_responder_before_feeder(self):
+        """Pins down the fixed order in main()'s finally: block (source
+        inspection, not a live process -- no hardware/subprocess here)."""
+        import inspect
+        source = inspect.getsource(orch.main)
+        finally_index = source.index("finally:")
+        responder_index = source.index('"responder"', finally_index)
+        feeder_index = source.index('"feeder"', finally_index)
+        ppp_stop_index = source.index("ppp_stop", finally_index)
+        self.assertLess(responder_index, feeder_index)
+        self.assertLess(feeder_index, ppp_stop_index)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -19,9 +19,11 @@ file passed via --output.
 import argparse
 import csv
 import os
+import signal
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 from sr75_sim_json_test_profiles import BASE_ALT_M, BASE_LAT, BASE_LON, BASE_YAW_DEG  # noqa: E402
@@ -70,7 +72,13 @@ def build_static_row(t_s, lat_deg=BASE_LAT, lon_deg=BASE_LON, alt_m=BASE_ALT_M,
     }
 
 
-def atomic_write_csv_snapshot(path, fieldnames, row):
+@dataclass
+class SnapshotWriteStats:
+    total_s: float
+    fsync_s: float
+
+
+def atomic_write_csv_snapshot(path, fieldnames, row, fsync=False):
     """HIL-F24-P: (re)write a single-row CSV snapshot atomically.
 
     The previous implementation opened `path` with mode "w" (truncating it
@@ -83,20 +91,46 @@ def atomic_write_csv_snapshot(path, fieldnames, row):
 
     Instead, the complete header + row is written to a temporary file in
     the *same directory* as `path` (so the final os.replace() is a rename
-    within one filesystem, which POSIX guarantees is atomic), flushed and
-    fsynced, then swapped into place. A reader opening `path` at any point
-    in time therefore only ever observes either the previous complete
-    snapshot or the new complete snapshot -- never a partial one.
+    within one filesystem, which POSIX guarantees is atomic), flushed (and
+    optionally fsynced), then swapped into place. A reader opening `path`
+    at any point in time therefore only ever observes either the previous
+    complete snapshot or the new complete snapshot -- never a partial one.
+    This atomicity guarantee comes entirely from os.replace()'s same-
+    filesystem rename semantics and does NOT depend on fsync() at all.
+
+    HIL-F24-Q: `fsync` defaults to False. fsync() only affects
+    *crash/power-loss durability* -- whether this write would survive the
+    host dying before the data reaches stable storage -- which is
+    irrelevant for this transient, continuously-regenerated (every
+    1/rate_hz seconds) live HIL snapshot: if the feeder process dies, the
+    file is either regenerated within milliseconds by a restarted feeder
+    or the whole test is aborted, so there is nothing here worth losing
+    sleep over durability-wise. *Read-atomicity* (what concurrent readers
+    observe) is unaffected either way. On the SR-75 bench's storage, a
+    single fsync() call was found capable of stalling for over a second
+    (see the HIL-F24-Q report's analysis of request 573's 1703.1ms
+    STALE_STATE row age), which is exactly why per-write fsync must not be
+    the default for this use case. Pass fsync=True (--fsync on the CLI)
+    only if crash-durability of the very last snapshot is specifically
+    required for some other use of this function.
+
+    Returns a SnapshotWriteStats(total_s, fsync_s) so callers can track
+    write-latency and isolate how much of it (if any) fsync() accounts for.
     """
     directory = os.path.dirname(os.path.abspath(path)) or "."
     fd, tmp_path = tempfile.mkstemp(prefix=".state_csv_", suffix=".tmp", dir=directory)
+    write_start = time.perf_counter()
+    fsync_s = 0.0
     try:
         with os.fdopen(fd, "w", newline="", encoding="utf-8") as tmp_file:
             writer = csv.DictWriter(tmp_file, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerow(row)
             tmp_file.flush()
-            os.fsync(tmp_file.fileno())
+            if fsync:
+                fsync_start = time.perf_counter()
+                os.fsync(tmp_file.fileno())
+                fsync_s = time.perf_counter() - fsync_start
         os.replace(tmp_path, path)
     except BaseException:
         try:
@@ -104,6 +138,43 @@ def atomic_write_csv_snapshot(path, fieldnames, row):
         except OSError:
             pass
         raise
+    return SnapshotWriteStats(total_s=time.perf_counter() - write_start, fsync_s=fsync_s)
+
+
+def _percentile(sorted_values, pct):
+    """Linear-interpolation percentile over an already-sorted sequence."""
+    if not sorted_values:
+        return 0.0
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    k = (len(sorted_values) - 1) * (pct / 100.0)
+    f = int(k)
+    c = min(f + 1, len(sorted_values) - 1)
+    if f == c:
+        return sorted_values[f]
+    return sorted_values[f] + (sorted_values[c] - sorted_values[f]) * (k - f)
+
+
+def print_write_summary(write_stats, longest_gap_s, fsync_enabled):
+    """HIL-F24-Q: prints max/p95/p99 write latency, total fsync time, and
+    the longest observed gap between successive write iterations (the
+    real-world signature of a stall like request 573's: a single write
+    that takes far longer than 1/rate_hz shows up here as a large gap)."""
+    total_durations_ms = sorted(s.total_s * 1000.0 for s in write_stats)
+    if not total_durations_ms:
+        print("WRITE_SUMMARY no writes recorded")
+        return
+    fsync_total_ms = sum(s.fsync_s for s in write_stats) * 1000.0
+    print(
+        "WRITE_SUMMARY "
+        f"write_count={len(write_stats)} "
+        f"fsync_enabled={int(fsync_enabled)} "
+        f"max_write_latency_ms={total_durations_ms[-1]:.3f} "
+        f"p95_write_latency_ms={_percentile(total_durations_ms, 95):.3f} "
+        f"p99_write_latency_ms={_percentile(total_durations_ms, 99):.3f} "
+        f"total_fsync_time_ms={fsync_total_ms:.3f} "
+        f"longest_scheduling_gap_ms={longest_gap_s * 1000.0:.3f}"
+    )
 
 
 def build_arg_parser():
@@ -116,26 +187,65 @@ def build_arg_parser():
     parser.add_argument("--alt-m", type=float, default=BASE_ALT_M)
     parser.add_argument("--yaw-deg", type=float, default=BASE_YAW_DEG)
     parser.add_argument("--airspeed-mps", type=float, default=0.0)
+    parser.add_argument(
+        "--fsync", action="store_true",
+        help=(
+            "Call os.fsync() after each snapshot write. Default off: atomicity "
+            "for concurrent readers comes entirely from the same-directory "
+            "temp-file + os.replace() rename, not from fsync(); fsync() only "
+            "affects crash/power-loss durability, which does not matter for "
+            "this transient, continuously-regenerated live snapshot, and a "
+            "single fsync() call has been observed to stall over a second on "
+            "the SR-75 bench's storage (see the HIL-F24-Q report)."
+        ),
+    )
     return parser
 
 
+class _FeederShutdownRequested(Exception):
+    """HIL-F24-Q: raised by the SIGTERM handler below."""
+
+
+def _raise_shutdown_on_sigterm(signum, frame) -> None:
+    """HIL-F24-Q: with the orchestrator shutdown-ordering fix, the feeder
+    is now *deliberately* still mid-run (see FEEDER_SHUTDOWN_MARGIN_S in
+    sr75_hil_f24f_hardware_orchestrator.py) when the orchestrator stops it
+    with SIGTERM. Without this handler the process would simply die
+    without ever reaching print_write_summary() below, silently discarding
+    the write-count/latency/scheduling-gap metrics accumulated so far --
+    which are exactly the numbers task 5 asks this run to report."""
+    raise _FeederShutdownRequested()
+
+
 def main():
+    signal.signal(signal.SIGTERM, _raise_shutdown_on_sigterm)
     args = build_arg_parser().parse_args()
     dt = 1.0 / args.rate_hz
     n_writes = max(1, int(round(args.duration_s / dt)))
     print(f"Writing static state to {args.output}: lat={args.lat_deg} lon={args.lon_deg} "
           f"alt={args.alt_m} yaw_deg={args.yaw_deg} airspeed_mps={args.airspeed_mps} "
-          f"rate_hz={args.rate_hz} duration_s={args.duration_s}")
+          f"rate_hz={args.rate_hz} duration_s={args.duration_s} fsync={args.fsync}")
     start = time.monotonic()
-    for i in range(n_writes):
-        t_s = time.monotonic() - start
-        row = build_static_row(t_s, args.lat_deg, args.lon_deg, args.alt_m, args.yaw_deg, args.airspeed_mps)
-        atomic_write_csv_snapshot(args.output, CSV_FIELDS, row)
-        next_write = start + (i + 1) * dt
-        sleep_s = next_write - time.monotonic()
-        if sleep_s > 0:
-            time.sleep(sleep_s)
-    print(f"Done: {n_writes} writes over {time.monotonic() - start:.1f}s")
+    write_stats = []
+    prev_iter_start = None
+    longest_gap_s = 0.0
+    try:
+        for i in range(n_writes):
+            iter_start = time.monotonic()
+            if prev_iter_start is not None:
+                longest_gap_s = max(longest_gap_s, iter_start - prev_iter_start)
+            prev_iter_start = iter_start
+            t_s = iter_start - start
+            row = build_static_row(t_s, args.lat_deg, args.lon_deg, args.alt_m, args.yaw_deg, args.airspeed_mps)
+            write_stats.append(atomic_write_csv_snapshot(args.output, CSV_FIELDS, row, fsync=args.fsync))
+            next_write = start + (i + 1) * dt
+            sleep_s = next_write - time.monotonic()
+            if sleep_s > 0:
+                time.sleep(sleep_s)
+    except _FeederShutdownRequested:
+        print("Stopped by SIGTERM")
+    print(f"Done: {len(write_stats)} writes over {time.monotonic() - start:.1f}s")
+    print_write_summary(write_stats, longest_gap_s, args.fsync)
     return 0
 
 

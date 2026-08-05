@@ -12,6 +12,7 @@ import csv
 import json
 import math
 import os
+import signal
 import socket
 import struct
 import sys
@@ -2123,7 +2124,41 @@ def print_b3_startup_scoring_debug(request_count: int, diagnostic: Dict[str, obj
     )
 
 
+def _raise_keyboard_interrupt_on_sigterm(signum, frame) -> None:
+    """HIL-F24-Q: the orchestrator stops the responder with SIGTERM
+    (subprocess.Popen(...).terminate()), which Python does not otherwise
+    turn into a catchable exception. Converting it into a KeyboardInterrupt
+    lets the existing `except KeyboardInterrupt: ... finally: ...` block in
+    main()'s request loop run (and print the run-summary, see
+    print_run_summary()) instead of the process dying with no summary."""
+    raise KeyboardInterrupt()
+
+
+def print_run_summary(
+    request_count: int,
+    replies_sent_count: int,
+    stale_state_count: int,
+    no_fresh_state_count: int,
+    malformed_state_count: int,
+    state_read_error_count: int,
+) -> None:
+    """HIL-F24-Q: final run-summary metrics, printed once on any exit path
+    (normal, --once, or SIGTERM/KeyboardInterrupt) -- see the `finally:`
+    block at the end of main()."""
+    print(
+        "RUN_SUMMARY "
+        f"total_requests={request_count} "
+        f"replies_sent={replies_sent_count} "
+        f"stale_state_count={stale_state_count} "
+        f"no_fresh_state_count={no_fresh_state_count} "
+        f"malformed_state_count={malformed_state_count} "
+        f"state_read_error_count={state_read_error_count} "
+        f"missed_replies={request_count - replies_sent_count}"
+    )
+
+
 def main() -> int:
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt_on_sigterm)
     args = build_arg_parser().parse_args()
     # HIL-F24-B: apply the transport-profile preset only if --listen-host
     # was left at its default -- an explicit --listen-host always wins.
@@ -2272,6 +2307,12 @@ def main() -> int:
     min_interval = 1.0 / args.rate_limit_hz if args.rate_limit_hz and args.rate_limit_hz > 0.0 else 0.0
     last_reply_mono = 0.0
     request_count = 0
+    # HIL-F24-Q: run-summary counters, reported by print_run_summary() in
+    # the finally: block below on any exit path.
+    replies_sent_count = 0
+    stale_state_count = 0
+    no_fresh_state_count = 0
+    malformed_state_count = 0
     previous_request_received_host_time: Optional[float] = None
     saved_first_request = False
     saved_first_reply = False
@@ -2758,12 +2799,23 @@ def main() -> int:
                 return 3
             except StateError as exc:
                 reason = str(exc)
-                if isinstance(exc, (StateFileNotReadyError, StateFileMalformedError)):
+                if isinstance(exc, StateFileMalformedError):
+                    malformed_state_count += 1
                     # HIL-F24-P: already logged (deduplicated) and counted
                     # inside read_reply_state() -- avoid printing it twice.
+                elif isinstance(exc, StateFileNotReadyError):
+                    # HIL-F24-P: already logged (deduplicated) and counted
+                    # inside read_reply_state() -- avoid printing it twice.
+                    # Startup-only condition; tracked in
+                    # mapper.state_read_error_count, not one of the three
+                    # named HIL-F24-Q run-summary categories.
                     pass
                 elif reason.startswith("STALE_STATE"):
+                    stale_state_count += 1
                     print(reason)
+                elif reason.startswith("NO_FRESH_STATE"):
+                    no_fresh_state_count += 1
+                    print(f"STATE_ERROR: {reason}")
                 else:
                     print(f"STATE_ERROR: {reason}")
                 if actuator_reason:
@@ -2811,6 +2863,7 @@ def main() -> int:
                     if args.verbose:
                         print(f"SAVED_FIRST_REPLY {args.save_first_reply} bytes={len(payload)}")
                 reply_bytes = sock.sendto(payload, source)
+                replies_sent_count += 1
                 last_reply_mono = time.monotonic()
                 reply_send_host_time = last_reply_mono
                 reason = actuator_reason
@@ -2863,6 +2916,14 @@ def main() -> int:
         print("Interrupted")
         return 0
     finally:
+        print_run_summary(
+            request_count=request_count,
+            replies_sent_count=replies_sent_count,
+            stale_state_count=stale_state_count,
+            no_fresh_state_count=no_fresh_state_count,
+            malformed_state_count=malformed_state_count,
+            state_read_error_count=mapper.state_read_error_count,
+        )
         sock.close()
         if command_sink is not None:
             command_sink.close()

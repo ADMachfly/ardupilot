@@ -48,6 +48,26 @@ SIM_JSON_DIR = LAYER2_DIR / "sim_json"
 PPP_DIR = LAYER2_DIR / "ppp"
 DEFAULT_SESSIONS_DIR = LAYER2_DIR / "hardware_sessions"
 
+# HIL-F24-Q: how long the orchestrator waits, beyond --duration-s, before it
+# begins the explicit shutdown sequence (stop responder, then feeder, then
+# PPP) -- unchanged from the pre-existing behavior.
+ORCHESTRATOR_TEST_MARGIN_S = 2.0
+
+# HIL-F24-Q: how much longer the feeder's OWN --duration-s runs beyond the
+# orchestrator's full pre-shutdown wait (--duration-s + ORCHESTRATOR_TEST_
+# MARGIN_S). Previously the feeder was given exactly --duration-s and so
+# exited on its own ~ORCHESTRATOR_TEST_MARGIN_S seconds *before* the
+# orchestrator even began stopping anything -- during that gap the
+# responder (which has no duration limit of its own) kept receiving and
+# trying to answer SIM_JSON requests against a state file that had
+# stopped being updated, producing NO_FRESH_STATE and then STALE_STATE
+# replies (the F24-P hardware run's requests 1489-1499). With this margin,
+# the feeder is still alive and actively writing for the entire window the
+# responder can receive requests, and is only ever stopped by the
+# explicit "stop responder, then feeder" sequence below -- never by its
+# own internal timeout expiring early.
+FEEDER_SHUTDOWN_MARGIN_S = 3.0
+
 PRECHECK_SCRIPT = SCRIPTS_DIR / "sr75_hil_f24c_preflash_precheck.py"
 FEEDER_SCRIPT = SIM_JSON_DIR / "sr75_hil_f24d_static_state_feed.py"
 RESPONDER_SCRIPT = SIM_JSON_DIR / "sr75_sim_json_responder.py"
@@ -110,9 +130,15 @@ def build_execution_plan(args) -> List[Step]:
     precheck_cmd = [
         sys.executable, str(PRECHECK_SCRIPT), "--pixhawk", args.pixhawk, "--baud", str(args.baud),
     ]
+    # HIL-F24-Q: the feeder runs FEEDER_SHUTDOWN_MARGIN_S longer than the
+    # orchestrator's total pre-shutdown wait (--duration-s +
+    # ORCHESTRATOR_TEST_MARGIN_S), so it is still alive when the
+    # orchestrator issues its explicit stop-responder-then-feeder sequence
+    # (see main()'s `finally:` block) instead of exiting on its own first.
+    feeder_duration_s = args.duration_s + ORCHESTRATOR_TEST_MARGIN_S + FEEDER_SHUTDOWN_MARGIN_S
     feeder_cmd = [
         sys.executable, str(FEEDER_SCRIPT), "--output", "{state_csv}",
-        "--duration-s", str(args.duration_s), "--rate-hz", str(args.rate_hz),
+        "--duration-s", str(feeder_duration_s), "--rate-hz", str(args.rate_hz),
     ]
     responder_cmd = [
         sys.executable, str(RESPONDER_SCRIPT),
@@ -246,13 +272,20 @@ def main():
         )
 
         print(f"Static SIM_JSON test running for {args.duration_s}s (feeder+responder); artifacts in {session_dir}")
-        time.sleep(args.duration_s + 2.0)
+        time.sleep(args.duration_s + ORCHESTRATOR_TEST_MARGIN_S)
         print("Static SIM_JSON test window complete.")
 
     except OrchestratorAbort as exc:
         print(f"ABORT: {exc}")
         exit_code = 3
     finally:
+        # HIL-F24-Q: order matters -- responder must be stopped before the
+        # feeder, so no responder request is ever received after the
+        # feeder has terminated. This is only meaningful because the
+        # feeder is now given FEEDER_SHUTDOWN_MARGIN_S extra --duration-s
+        # (see build_execution_plan()) so it is still running (and still
+        # writing) when execution reaches this point, rather than having
+        # already exited on its own a couple of seconds earlier.
         for proc, label in ((responder_proc, "responder"), (feeder_proc, "feeder")):
             if proc is not None and proc.poll() is None:
                 proc.terminate()
