@@ -1,0 +1,48 @@
+# =============================================================================
+# SIMULATION FIRMWARE -- fmuv3-SimOnHardWare (SR-75 HIL bench)
+#
+# THIS FIRMWARE MUST NEVER BE INSTALLED ON AN AIRCRAFT PREPARED FOR FLIGHT.
+#
+# It replaces the real IMU/barometer/compass/GPS/airspeed drivers with
+# SITL-style simulated backends driven by an external JSBSim state feed
+# over the SIM_JSON protocol (see AP_SIM_ENABLED / libraries/SITL/SIM_JSON.*).
+# It is built for the SR-75 Pixhawk 2.4.8 / fmuv3 HIL bench only, to let
+# EKF3 genuinely fuse coherent simulated sensors (unlike the bench's
+# existing GPS_INPUT-only path, and unlike this file's real-flight sibling
+# libraries/AP_HAL_ChibiOS/hwdef/fmuv3/hwdef.dat, which this file does NOT
+# modify in any way).
+#
+# See HIL-F24-A (feasibility audit) and HIL-F24-B (this target) reports in
+# Tools/autotest/sr75_hil_layer2/reports/ for the full rationale, measured
+# flash/RAM numbers, and the SIM_JSON protocol trace.
+#
+# Restoration to normal flight firmware: reflash the board with the
+# standard `fmuv3` target build and reload the bench's own validated
+# .param file. See the HIL-F24-B report's "Recovery" section for the full
+# procedure -- this hwdef file changes nothing about how that restoration
+# works, because it never touches libraries/AP_HAL_ChibiOS/hwdef/fmuv3/.
+# =============================================================================
+
+include ../fmuv3/hwdef.dat
+include ../include/SimOnHW.inc
+define AP_NETWORKING_BACKEND_PPP 1
+define AP_SIM_JSON_ENABLED 1
+define AP_SIM_FRAME_CLASS JSON
+define AP_SIM_FRAME_STRING "json:192.168.144.2"
+
+# Unique board/firmware identity (HIL-F24-B item 2). CHIBIOS_SHORT_BOARD_NAME
+# has a 23-character limit (see the existing CubeOrange-SimOnHardWare
+# precedent). AP_CUSTOM_FIRMWARE_STRING is an existing, hwdef-only ArduPilot
+# mechanism (libraries/AP_Common/AP_FWVersionDefine.h) that overrides the
+# very first line GCS_MAVLINK::send_banner() sends on every connect -- no
+# C++ code changes are needed to make "SIMULATION FIRMWARE" the first thing
+# Mission Planner's messages tab shows.
+define CHIBIOS_SHORT_BOARD_NAME "fmuv3-SR75-SoH"
+define AP_CUSTOM_FIRMWARE_STRING "SR75-SIMULATION-FIRMWARE-fmuv3-SoH-DO-NOT-FLY"
+
+# bootloader embedding / bootloader flashing not available (matches the
+# existing CubeOrange*-SimOnHardWare precedent exactly)
+define AP_BOOTLOADER_FLASHING_ENABLED 0
+
+AUTOBUILD_TARGETS Plane
+

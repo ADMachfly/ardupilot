@@ -36,6 +36,19 @@
 #define UDP_TIMEOUT_MS 100
 #define JSON_AIRSPEED_MAX_PRESSURE_PA 50000.0f
 
+// HIL-F24-N: on real hardware (CONFIG_HAL_BOARD != HAL_BOARD_SITL),
+// JSON::update() runs synchronously on the main vehicle thread (called
+// from AP_HAL::SIMState::update(), itself called every AP_Scheduler::
+// loop() tick -- see HIL-F24-M). An unbounded wait for a UDP reply here
+// therefore starves the ChibiOS watchdog/monitor-thread pat and forces a
+// hardfault/reset after ~1.8-2.1s if no reply arrives in time (this was
+// the confirmed cause of the JSON+PPP boot reboot loop). Bound the wait
+// to a couple of the existing 100ms recv() timeouts and let the next
+// scheduler tick retry naturally instead of blocking here -- long enough
+// to catch a reply that is already in flight, short enough to never
+// approach the ~500ms "main loop stuck" internal-error threshold.
+#define JSON_HW_RECV_TIMEOUT_MS 200
+
 extern const AP_HAL::HAL& hal;
 
 using namespace SITL;
@@ -326,6 +339,23 @@ uint64_t JSON::parse_sensors(const char *json)
 }
 
 /*
+    HIL-F24-N: single bounded-wait receive attempt, used by the non-SITL
+    branch of recv_fdm() below. See the declaration in SIM_JSON.h for why
+    this is its own unconditionally-compiled method rather than inlined
+    inside the `#if CONFIG_HAL_BOARD != HAL_BOARD_SITL` block.
+*/
+ssize_t JSON::recv_fdm_bounded(uint32_t timeout_ms)
+{
+    ssize_t ret = 0;
+    uint32_t waited_ms = 0;
+    while (ret <= 0 && waited_ms < timeout_ms) {
+        ret = sock.recv(&sensor_buffer[sensor_buffer_len], sizeof(sensor_buffer)-sensor_buffer_len, UDP_TIMEOUT_MS);
+        waited_ms += UDP_TIMEOUT_MS;
+    }
+    return ret;
+}
+
+/*
     Receive new sensor data from simulator
     This is a blocking function
 */
@@ -347,6 +377,21 @@ void JSON::recv_fdm(const struct sitl_input &input)
         return;
     }
 
+#if CONFIG_HAL_BOARD != HAL_BOARD_SITL
+    // Bounded wait: never block the caller (the main vehicle thread) for
+    // more than JSON_HW_RECV_TIMEOUT_MS. If nothing has arrived by then,
+    // return without parsing; JSON::update() is called again on the very
+    // next scheduler tick (a few ms later at typical loop rates), which
+    // will resend servos and try again -- so no separate "resend after
+    // N ms" fallback is needed here the way the desktop SITL path below
+    // needs one for its much longer unbounded wait.
+    if (ret <= 0 && wait_ms < JSON_HW_RECV_TIMEOUT_MS) {
+        ret = recv_fdm_bounded(JSON_HW_RECV_TIMEOUT_MS - wait_ms);
+    }
+    if (ret <= 0) {
+        return;
+    }
+#else
     while (ret <= 0) {
         //printf("No JSON sensor message received - %s\n", strerror(errno));
         ret = sock.recv(&sensor_buffer[sensor_buffer_len], sizeof(sensor_buffer)-sensor_buffer_len, UDP_TIMEOUT_MS);
@@ -358,6 +403,7 @@ void JSON::recv_fdm(const struct sitl_input &input)
             output_servos(input);
         }
     }
+#endif
 
     // convert '\n' into nul
     while (uint8_t *p = (uint8_t *)memchr(&sensor_buffer[sensor_buffer_len], '\n', ret)) {

@@ -40,6 +40,14 @@ public:
     /* Create and set in/out socket for JSON generic simulator */
     void set_interface_ports(const char* address, const int port_in, const int port_out) override;
 
+    // HIL-F24-N: grants host-side unit tests (libraries/SITL/tests/test_sim_json.cpp)
+    // access to otherwise-private members needed to exercise recv_fdm()/
+    // recv_fdm_bounded() end-to-end over a real loopback socket, without
+    // widening JSON's public API. Mirrors the existing `friend class Ship;`-
+    // style test/interop access pattern already used elsewhere in this
+    // directory (SIM_Ship.h, SIM_ADSB.h, SIM_SlungPayload.h).
+    friend class JSONTestAccess;
+
 private:
 
     struct servo_packet_16 {
@@ -75,10 +83,41 @@ private:
     void output_servos(const struct sitl_input &input);
     void recv_fdm(const struct sitl_input &input);
 
+    // HIL-F24-N: single bounded-wait receive attempt used by the non-SITL
+    // (real hardware) branch of recv_fdm(). Factored out of recv_fdm() as its
+    // own method -- rather than left inline inside the `#if CONFIG_HAL_BOARD
+    // != HAL_BOARD_SITL` block -- so that it compiles unconditionally on
+    // every board (it only touches `sock`, whose interface is identical for
+    // both the SocketAPM and SocketAPM_native cases) and can therefore be
+    // exercised directly by host-side unit tests even though a desktop test
+    // build (CONFIG_HAL_BOARD == HAL_BOARD_SITL) never itself takes the
+    // non-SITL branch of recv_fdm(). See libraries/SITL/tests/test_sim_json.cpp.
+    // Blocks for at most `timeout_ms`, in UDP_TIMEOUT_MS-sized slices, and
+    // returns whatever the last sock.recv() call returned (<=0 if nothing
+    // arrived in time).
+    ssize_t recv_fdm_bounded(uint32_t timeout_ms);
+
     uint64_t parse_sensors(const char *json);
 
-    // buffer for parsing pose data in JSON format
-    uint8_t sensor_buffer[65000];
+    // buffer for parsing pose data in JSON format.
+    //
+    // HIL-F24-N: reduced from 65000 to 8192 bytes. Evidence: the
+    // largest real SR-75 bench reply (all optional fields populated,
+    // 16 RC channels included) measures 661 bytes
+    // (Tools/autotest/sr75_hil_layer2/sim_json/sr75_sim_json_test_profiles.py's
+    // own generators via SimState.to_json_bytes()); the protocol's
+    // fixed 36-entry keytable[] bounds the theoretical worst case (every
+    // optional field present, maximally verbose float text) to a low
+    // single-digit KB. 8192 bytes keeps a >12x margin over the largest
+    // observed real payload while cutting sizeof(SITL::JSON) from a
+    // measured 68016 bytes to 11208 bytes (compiled with the exact
+    // fmuv3-SimOnHardWare build flags) -- against a 78748-byte total
+    // heap on that target, the original size left only ~10.7KB of
+    // margin for everything else allocated during boot; the reduced
+    // size leaves ~67.5KB. This buffer is also used to accumulate
+    // multiple queued datagrams (see recv_fdm()'s memmove/memrchr
+    // logic), so it is not reduced to the bare single-message size.
+    uint8_t sensor_buffer[8192];
     uint32_t sensor_buffer_len;
 
     enum data_type {

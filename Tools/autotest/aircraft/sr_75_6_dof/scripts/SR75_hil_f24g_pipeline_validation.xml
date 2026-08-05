@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="utf-8"?>
+<runscript xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="http://jsbsim.sf.net/JSBSimScript.xsd"
+    name="SR75 HIL-F24-G continuous multi-phase JSBSim to SIM_JSON pipeline validation">
+
+  <!--
+    HIL-F24-G: one continuous run through the real SR-75 6-DOF JSBSim
+    model, transitioning through every representative flight state item 2
+    asks for via timed control-input events only (no aero/RATO/TECS/
+    mission XML is modified). Starts from the already-validated B3-family
+    trim reference (layer2j_b3_trim_init: alt=3000m, TAS=134.1kts,
+    psi=315, phi=0, theta=-2, p=q=r=0) with the same precontrol trim
+    controls used throughout the B3C-C sessions (elevator=-0.42,
+    turbojet-throttle=0.55), so every phase boundary is a real, physically
+    continuous transition, not a disjoint reset, giving genuine data
+    for the phase-transition discontinuity check (item 8).
+
+    Phase timeline (dt=0.02s, 50 Hz throughout):
+      0.0  to 6.0   static/release trim hold
+      6.0  to 16.0  steady straight & level flight (same trim, held)
+      16.0 to 30.0  gentle roll turn: this airframe has essentially no
+                    open-loop roll damping (a sustained aileron command
+                    produces a roughly constant roll RATE, not a
+                    converging bank angle; confirmed empirically and
+                    consistent with SR75_test_roll.xml being a pure sign
+                    diagnostic, not a stability demonstration), so a small
+                    bang-bang aileron pulse is used instead of a step:
+                    aileron +0.01 (16-20 s) rolls in to ~+11 deg, aileron
+                    -0.01 (20-24 s) cancels the roll rate, then neutral
+                    (24-30 s) settles near a small residual bank. This is
+                    also the source of the "heading change" case:
+                    coordinated-turn yaw drift (315 -> ~320 deg and back)
+                    is reported directly from this phase.
+      30.0 to 40.0  pitch climb (small elevator authority: -0.42 -> -0.44)
+      40.0 to 50.0  descent (small elevator authority: -0.44 -> -0.40)
+      50.0 to 60.0  return to level trim (settle/buffer before RATO)
+      60.0 to 62.0  RATO boost segment (ignite RATO at partial throttle
+                    0.3 for a 1 s burn; full throttle 1.0 as used in
+                    SR75_rato_takeoff_test.xml is appropriate for that
+                    script's low-speed launch IC, but at this run's
+                    cruise altitude/airspeed produces a divergent,
+                    tumbling pitch response (confirmed empirically),
+                    since RATO is designed as a low-speed launch-assist
+                    device, not a mid-cruise boost; partial throttle
+                    keeps this phase's dynamics bounded while still
+                    producing a clear, measurable thrust/acceleration
+                    spike for the pipeline to carry)
+      62.0 to 74.0  post-burn/coast (RATO burnout, turbojet-only)
+
+    RATO is exercised at the same cruise altitude/airspeed as the rest of
+    this run rather than a separate low-speed launch IC (rato_init.xml)
+    because JSBSim cannot switch <initialize> blocks mid-script and a
+    single continuous timestamp series is required for the phase-
+    transition check above; this is a data-pipeline coherence test, not a
+    realistic RATO-launch flight-dynamics test (that is already covered
+    by SR75_rato_takeoff_test.xml). Full ejection/separation dynamics
+    (mass/aero property change) are explicitly out of scope per this
+    task's instruction not to modify validated aero/RATO logic; only
+    the post-burn/coast state is exercised.
+  -->
+
+  <use aircraft="sr_75_6_dof" initialize="layer2j_b3_trim_init"/>
+
+  <run start="0.0" end="74.0" dt="0.02">
+    <event name="Phase 0: static/release trim hold">
+      <condition>simulation/sim-time-sec ge 0.0</condition>
+      <set name="propulsion/engine[0]/set-running" value="1"/>
+      <set name="propulsion/engine[1]/set-running" value="1"/>
+      <set name="propulsion/engine[2]/set-running" value="0"/>
+      <set name="fcs/elevator-cmd-norm" value="-0.42"/>
+      <set name="fcs/aileron-cmd-norm" value="0.0"/>
+      <set name="fcs/rudder-cmd-norm" value="0.0"/>
+      <set name="fcs/turbojet-throttle-cmd-norm" value="0.55"/>
+      <set name="fcs/rato-throttle-cmd-norm" value="0.0"/>
+      <notify/>
+    </event>
+
+    <event name="Phase 1: steady straight and level flight">
+      <condition>simulation/sim-time-sec ge 6.0</condition>
+      <notify/>
+    </event>
+
+    <event name="Phase 2: gentle roll turn begins (bang-bang roll-in, small authority)">
+      <condition>simulation/sim-time-sec ge 16.0</condition>
+      <set name="fcs/aileron-cmd-norm" value="0.01"/>
+      <notify/>
+    </event>
+
+    <event name="Phase 2b: roll-out (cancel accumulated roll rate)">
+      <condition>simulation/sim-time-sec ge 20.0</condition>
+      <set name="fcs/aileron-cmd-norm" value="-0.01"/>
+      <notify/>
+    </event>
+
+    <event name="Phase 2c: neutral aileron (settle near small residual bank)">
+      <condition>simulation/sim-time-sec ge 24.0</condition>
+      <set name="fcs/aileron-cmd-norm" value="0.0"/>
+      <notify/>
+    </event>
+
+    <event name="Phase 3: pitch climb begins (small elevator authority)">
+      <condition>simulation/sim-time-sec ge 30.0</condition>
+      <set name="fcs/elevator-cmd-norm" value="-0.44"/>
+      <notify/>
+    </event>
+
+    <event name="Phase 4: descent begins (small elevator authority)">
+      <condition>simulation/sim-time-sec ge 40.0</condition>
+      <set name="fcs/elevator-cmd-norm" value="-0.40"/>
+      <notify/>
+    </event>
+
+    <event name="Phase 5: return to level trim before RATO">
+      <condition>simulation/sim-time-sec ge 50.0</condition>
+      <set name="fcs/elevator-cmd-norm" value="-0.42"/>
+      <notify/>
+    </event>
+
+    <event name="Phase 6: RATO ignition (partial throttle, short burn; see note above)">
+      <condition>simulation/sim-time-sec ge 60.0</condition>
+      <set name="propulsion/engine[2]/set-running" value="1"/>
+      <set name="fcs/rato-throttle-cmd-norm" value="0.3"/>
+      <notify/>
+    </event>
+
+    <event name="Phase 6b: RATO burnout">
+      <condition>simulation/sim-time-sec ge 61.0</condition>
+      <set name="fcs/rato-throttle-cmd-norm" value="0.0"/>
+      <set name="propulsion/engine[2]/set-running" value="0"/>
+      <notify/>
+    </event>
+
+    <event name="Phase 7: post-burn coast (turbojet only)">
+      <condition>simulation/sim-time-sec ge 62.0</condition>
+      <notify/>
+    </event>
+  </run>
+
+  <output name="sr75_hil_f24g_pipeline_validation.csv" type="CSV" rate="50">
+    <property>simulation/sim-time-sec</property>
+    <property>position/lat-gc-deg</property>
+    <property>position/long-gc-deg</property>
+    <property>position/h-sl-ft</property>
+    <property>position/h-agl-ft</property>
+    <property>velocities/v-north-fps</property>
+    <property>velocities/v-east-fps</property>
+    <property>velocities/v-down-fps</property>
+    <property>velocities/vc-kts</property>
+    <property>velocities/vt-fps</property>
+    <property>attitude/phi-deg</property>
+    <property>attitude/theta-rad</property>
+    <property>attitude/theta-deg</property>
+    <property>attitude/psi-deg</property>
+    <property>aero/alpha-rad</property>
+    <property>aero/beta-rad</property>
+    <function name="p_rad_s"><property>velocities/p-rad_sec</property></function>
+    <function name="q_rad_s"><property>velocities/q-rad_sec</property></function>
+    <function name="r_rad_s"><property>velocities/r-rad_sec</property></function>
+    <function name="accel_body_x_mss"><product><property>accelerations/a-pilot-x-ft_sec2</property><value>0.3048</value></product></function>
+    <function name="accel_body_y_mss"><product><property>accelerations/a-pilot-y-ft_sec2</property><value>0.3048</value></product></function>
+    <function name="accel_body_z_mss"><product><property>accelerations/a-pilot-z-ft_sec2</property><value>0.3048</value></product></function>
+    <function name="q1"><sum><product><cos><product><property>attitude/phi-rad</property><value>0.5</value></product></cos><cos><product><property>attitude/theta-rad</property><value>0.5</value></product></cos><cos><product><property>attitude/psi-rad</property><value>0.5</value></product></cos></product><product><sin><product><property>attitude/phi-rad</property><value>0.5</value></product></sin><sin><product><property>attitude/theta-rad</property><value>0.5</value></product></sin><sin><product><property>attitude/psi-rad</property><value>0.5</value></product></sin></product></sum></function>
+    <function name="q2"><difference><product><sin><product><property>attitude/phi-rad</property><value>0.5</value></product></sin><cos><product><property>attitude/theta-rad</property><value>0.5</value></product></cos><cos><product><property>attitude/psi-rad</property><value>0.5</value></product></cos></product><product><cos><product><property>attitude/phi-rad</property><value>0.5</value></product></cos><sin><product><property>attitude/theta-rad</property><value>0.5</value></product></sin><sin><product><property>attitude/psi-rad</property><value>0.5</value></product></sin></product></difference></function>
+    <function name="q3"><sum><product><cos><product><property>attitude/phi-rad</property><value>0.5</value></product></cos><sin><product><property>attitude/theta-rad</property><value>0.5</value></product></sin><cos><product><property>attitude/psi-rad</property><value>0.5</value></product></cos></product><product><sin><product><property>attitude/phi-rad</property><value>0.5</value></product></sin><cos><product><property>attitude/theta-rad</property><value>0.5</value></product></cos><sin><product><property>attitude/psi-rad</property><value>0.5</value></product></sin></product></sum></function>
+    <function name="q4"><difference><product><cos><product><property>attitude/phi-rad</property><value>0.5</value></product></cos><cos><product><property>attitude/theta-rad</property><value>0.5</value></product></cos><sin><product><property>attitude/psi-rad</property><value>0.5</value></product></sin></product><product><sin><product><property>attitude/phi-rad</property><value>0.5</value></product></sin><sin><product><property>attitude/theta-rad</property><value>0.5</value></product></sin><cos><product><property>attitude/psi-rad</property><value>0.5</value></product></cos></product></difference></function>
+    <property>fcs/elevator-cmd-norm</property>
+    <property>fcs/aileron-cmd-norm</property>
+    <property>fcs/rudder-cmd-norm</property>
+    <property>fcs/turbojet-throttle-cmd-norm</property>
+    <property>fcs/rato-throttle-cmd-norm</property>
+    <property>fcs/left-elevon-pos-rad</property>
+    <property>fcs/right-elevon-pos-rad</property>
+    <property>propulsion/engine[0]/thrust-lbs</property>
+    <property>propulsion/engine[1]/thrust-lbs</property>
+    <property>propulsion/engine[2]/thrust-lbs</property>
+    <property>propulsion/engine[0]/set-running</property>
+    <property>propulsion/engine[2]/set-running</property>
+  </output>
+
+</runscript>

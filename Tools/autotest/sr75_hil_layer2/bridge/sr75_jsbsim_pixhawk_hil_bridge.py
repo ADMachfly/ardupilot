@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 
 from pymavlink import mavutil
 
+import sr75_mission_heading
+
 
 GPS_EPOCH_UNIX_S = 315964800
 
@@ -32,6 +34,7 @@ MESSAGE_RATES_HZ = {
     "LOCAL_POSITION_NED": 5,
     "GLOBAL_POSITION_INT": 5,
     "VFR_HUD": 5,
+    "GPS_RAW_INT": 5,
     "RC_CHANNELS": 5,
 }
 
@@ -99,7 +102,8 @@ JSB_FEED_ALIASES = {
     ),
     "jsb_feed_pitch_rad": (
         "pitch_rad", "theta_rad", "jsb_pitch_rad", "jsb_feed_pitch_rad", "theta_deg",
-        "attitude/theta-rad", "attitude/theta-deg", "/fdm/jsbsim/attitude/theta-rad",
+        "attitude/theta-rad", "attitude/theta-deg",
+        "/fdm/jsbsim/attitude/theta-rad", "/fdm/jsbsim/attitude/theta-deg",
     ),
     "jsb_feed_yaw_rad": (
         "yaw_rad", "psi_rad", "jsb_yaw_rad", "jsb_feed_yaw_rad", "psi_deg",
@@ -122,6 +126,13 @@ JSB_FEED_ALIAS_SCALES.update({
     "attitude/phi-deg": math.pi / 180.0,
     "attitude/theta-deg": math.pi / 180.0,
     "attitude/psi-deg": math.pi / 180.0,
+    # HIL-F23-E2A: JSBSIM_FIELDS only defines a *theta-rad* prefixed entry
+    # (assuming a theta-rad column exists, scale=1.0); the AM2-schema
+    # <output> block used here only ever emits attitude/theta-deg, so
+    # without this the /fdm/jsbsim/attitude/theta-deg alias would match
+    # but get NO unit conversion, sending raw degrees mislabeled as
+    # radians (a ~57x magnitude error) to the Pixhawk.
+    "/fdm/jsbsim/attitude/theta-deg": math.pi / 180.0,
 })
 
 JSB_FEED_TO_JSB_ROW = {
@@ -140,7 +151,19 @@ JSB_FEED_TO_JSB_ROW = {
 
 
 def blank_jsbsim_row():
-    return {field_name: "" for field_name, _column_name, _scale in JSBSIM_FIELDS}
+    row = {field_name: "" for field_name, _column_name, _scale in JSBSIM_FIELDS}
+    # HIL-F23-F2B0A: gps_input_yaw_deg is not a raw JSBSim CSV column (it
+    # is bolted onto this row shape by static_gps_input_row()/
+    # _jsb_row_from_feed() below, then read by GPSInputInjector.send()).
+    # It MUST be part of the blank/default row too, because the bridge's
+    # CSV `fieldnames` are frozen once, up front, from a call to
+    # make_row() using this blank row (see main()) -- if a later real row
+    # introduces a key this blank row doesn't have, csv.DictWriter raises
+    # "dict contains fields not in fieldnames". This exact crash was
+    # observed on real hardware once --gps-input-send-yaw started
+    # producing real GPS_INPUT rows.
+    row["gps_input_yaw_deg"] = ""
+    return row
 
 
 def static_gps_input_row(args):
@@ -153,6 +176,12 @@ def static_gps_input_row(args):
         "jsb_vn_mps": args.gps_input_static_vn,
         "jsb_ve_mps": args.gps_input_static_ve,
         "jsb_vd_mps": args.gps_input_static_vd,
+        # HIL-F23-F2B0A: only populated when yaw transmission is actually
+        # enabled, so the CSV schema stays stable AND shows a blank value
+        # (not a numeric candidate that was never sent) whenever
+        # --gps-input-send-yaw is off -- matches GPSInputInjector.send()'s
+        # own send_yaw gate exactly, rather than relying on it alone.
+        "gps_input_yaw_deg": args.att_yaw_deg if getattr(args, "gps_input_send_yaw", False) else "",
     })
     return row
 
@@ -169,6 +198,10 @@ def blank_gps_input_log_row(enabled=False):
         "gps_tx_fix_type": "",
         "gps_tx_satellites": "",
         "gps_tx_count": 0,
+        # HIL-F23-F2B3: the actual wire-encoded yaw value (0 = "not
+        # available", per GPS_INPUT.yaw's spec) -- was previously not
+        # logged at all, needed for a "commanded vs AHRS2 yaw" summary.
+        "gps_tx_yaw_cdeg": "",
     }
 
 
@@ -343,6 +376,7 @@ class JSBSimStateFeeder:
         self.last_feed_time_s = None
         self.last_source_mtime = None
         self.stale_reported = False
+        self.max_observed_gap_s = 0.0
 
     def _warn_once(self, key, message):
         if key in self.warning_keys:
@@ -446,10 +480,21 @@ class JSBSimStateFeeder:
                 row[field_name] = f"{value:.7f}" if value != "" else ""
         return row
 
-    def _jsb_row_from_feed(self, feed_row):
+    def _jsb_row_from_feed(self, feed_row, send_yaw=False):
         row = blank_jsbsim_row()
         for feed_field, jsb_field in JSB_FEED_TO_JSB_ROW.items():
             row[jsb_field] = feed_row[feed_field]
+        # HIL-F23-F2B0A: only populated when yaw transmission is actually
+        # enabled (--gps-input-send-yaw), so the CSV schema stays stable
+        # AND shows a blank value (not a numeric candidate that was never
+        # sent) whenever it is off -- matches GPSInputInjector.send()'s
+        # own send_yaw gate exactly, rather than relying on it alone.
+        # Live feed yaw always takes precedence over the mission-derived
+        # static value once present, matching every other live-feed
+        # field's precedence rule.
+        if send_yaw:
+            yaw_rad = feed_row.get("jsb_feed_yaw_rad")
+            row["gps_input_yaw_deg"] = math.degrees(yaw_rad) if yaw_rad is not None and math.isfinite(yaw_rad) else ""
         return row
 
     def read_latest(self, args):
@@ -482,7 +527,9 @@ class JSBSimStateFeeder:
             source_mtime != self.last_source_mtime
         )
         self.last_valid_feed_row = self._format_feed_row(feed_row)
-        self.last_valid_jsb_row = self._jsb_row_from_feed(feed_row)
+        self.last_valid_jsb_row = self._jsb_row_from_feed(
+            feed_row, send_yaw=getattr(args, "gps_input_send_yaw", False),
+        )
         self.last_feed_time_s = feed_row["jsb_feed_time_s"]
         self.last_source_mtime = source_mtime
         if data_advanced:
@@ -495,12 +542,26 @@ class JSBSimStateFeeder:
             return blank_jsb_feed_log_row(True)
         return dict(self.last_valid_feed_row)
 
+    def current_gap_s(self):
+        """Seconds since the JSBSim state input last actually advanced (None
+        if no valid row has ever been received)."""
+        if self.last_valid_wall is None:
+            return None
+        return time.time() - self.last_valid_wall
+
     def is_stale(self):
-        return self.last_valid_wall is not None and time.time() - self.last_valid_wall > self.stale_timeout_s
+        gap = self.current_gap_s()
+        if gap is not None:
+            self.max_observed_gap_s = max(self.max_observed_gap_s, gap)
+        return gap is not None and gap > self.stale_timeout_s
 
     def maybe_print_stale(self):
         if self.is_stale() and not self.stale_reported:
-            print(f"Warning: JSBSim state input stale for more than {self.stale_timeout_s:.1f}s")
+            print(
+                f"Warning: JSBSim state input stale for more than {self.stale_timeout_s:.1f}s "
+                "-- HIL-F23-E1: pausing GPS_INPUT/AIRSPEED/ATTITUDE transmission until fresh data resumes "
+                "(the last-known moving state is NOT sent indefinitely)"
+            )
             self.stale_reported = True
 
     def print_observer(self):
@@ -733,13 +794,14 @@ class HILInjector:
 
 
 class GPSInputInjector:
-    def __init__(self, master, rate_hz, dry_run, gps_id, ignore_flags, debug):
+    def __init__(self, master, rate_hz, dry_run, gps_id, ignore_flags, debug, send_yaw=False):
         self.master = master
         self.rate_hz = rate_hz
         self.dry_run = dry_run
         self.gps_id = gps_id
         self.ignore_flags = ignore_flags
         self.debug = debug
+        self.send_yaw = send_yaw
         self.gps_input_sent_count = 0
         self.gps_input_dryrun_count = 0
         self.gps_input_valid_count = 0
@@ -751,8 +813,21 @@ class GPSInputInjector:
         self.gps_input_enabled = hasattr(master.mav, "gps_input_send")
         print(f"GPS_INPUT available: {'yes' if self.gps_input_enabled else 'no'}")
         if self.gps_input_enabled:
-            print(f"GPS_INPUT send signature: {inspect.signature(master.mav.gps_input_send)}")
-            print("GPS_INPUT yaw extension available: no")
+            signature = inspect.signature(master.mav.gps_input_send)
+            self.gps_input_yaw_param_available = "yaw" in signature.parameters
+            print(f"GPS_INPUT send signature: {signature}")
+            # HIL-F23-F2A: this used to be a hardcoded "no" regardless of
+            # reality. The yaw field is a MAVLink2 extension (common.xml
+            # message id 232) -- it IS present in this signature whenever
+            # pymavlink was imported with MAVLINK20=1 (this module sets
+            # that env var before importing pymavlink, so it is normally
+            # available here). --gps-input-send-yaw additionally controls
+            # whether this bridge actually POPULATES it (see send()).
+            print(
+                "GPS_INPUT yaw extension available: "
+                f"{'yes' if self.gps_input_yaw_param_available else 'no'} "
+                f"(sending: {'yes' if self.send_yaw and self.gps_input_yaw_param_available else 'no'})"
+            )
 
     def gps_time(self):
         unix_now = time.time()
@@ -800,7 +875,7 @@ class GPSInputInjector:
             f"vn={packet['vn']} ve={packet['ve']} vd={packet['vd']} "
             f"speed_accuracy={packet['speed_accuracy']} horiz_accuracy={packet['horiz_accuracy']} "
             f"vert_accuracy={packet['vert_accuracy']} satellites_visible={packet['satellites_visible']} "
-            f"yaw=unsupported status={reason_text}"
+            f"yaw={packet['yaw']} status={reason_text}"
         )
 
     def send(self, row):
@@ -819,6 +894,18 @@ class GPSInputInjector:
         ve = safe_float(row, "jsb_ve_mps", 0.0)
         vd = safe_float(row, "jsb_vd_mps", 0.0)
         time_usec, time_week_ms, time_week = self.gps_time()
+        # HIL-F23-F2A: yaw is only ever populated from row data when this
+        # injector was explicitly constructed with send_yaw=True
+        # (--gps-input-send-yaw) -- default behaviour (send_yaw=False) is
+        # byte-for-byte identical to every previously-validated bridge
+        # command, which always encoded "not available" (0) here.
+        # HIL-F23-F2B0A: safe_float (not row.get()) so a blank ("")
+        # gps_input_yaw_deg -- the schema-stable default whenever no real
+        # heading is available -- safely becomes None (encode_gps_input_
+        # yaw_cdeg's own "not available" input), instead of being passed
+        # through as a bare string and crashing math.isfinite("").
+        yaw_source_deg = safe_float(row, "gps_input_yaw_deg") if self.send_yaw else None
+        yaw_cdeg = sr75_mission_heading.encode_gps_input_yaw_cdeg(yaw_source_deg)
         packet = {
             "time_usec": time_usec,
             "gps_id": self.gps_id,
@@ -840,6 +927,7 @@ class GPSInputInjector:
             "horiz_accuracy": 1.0,
             "vert_accuracy": 1.5,
             "satellites_visible": 12,
+            "yaw": yaw_cdeg,
         }
         reasons = self.validate_packet(packet)
         self.maybe_print_debug(packet, reasons)
@@ -851,6 +939,9 @@ class GPSInputInjector:
         self.gps_input_valid_count += 1
         if not self.dry_run:
             try:
+                send_kwargs = {}
+                if self.gps_input_yaw_param_available:
+                    send_kwargs["yaw"] = packet["yaw"]
                 self.master.mav.gps_input_send(
                     packet["time_usec"],
                     packet["gps_id"],
@@ -870,6 +961,7 @@ class GPSInputInjector:
                     packet["horiz_accuracy"],
                     packet["vert_accuracy"],
                     packet["satellites_visible"],
+                    **send_kwargs,
                 )
             except Exception as ex:
                 self.gps_input_send_exception_count += 1
@@ -916,6 +1008,7 @@ class GPSInputInjector:
                 "gps_tx_vd_mps": f"{packet['vd']:.2f}",
                 "gps_tx_fix_type": packet["fix_type"],
                 "gps_tx_satellites": packet["satellites_visible"],
+                "gps_tx_yaw_cdeg": packet["yaw"],
             })
         return row
 
@@ -1122,6 +1215,15 @@ def parse_args():
     parser.add_argument("--gps-input-id", type=int, default=0, help="GPS_INPUT gps_id field")
     parser.add_argument("--gps-input-ignore-flags", type=int, default=0, help="GPS_INPUT ignore_flags field")
     parser.add_argument("--gps-input-debug", action="store_true", help="Print one GPS_INPUT sample per second")
+    parser.add_argument(
+        "--gps-input-send-yaw", action="store_true",
+        help="HIL-F23-F2A: populate the GPS_INPUT.yaw MAVLink2 extension field (mission-derived or "
+             "live-JSBSim-feed heading, live feed always wins). Disabled by default so every "
+             "previously-validated bridge command is unaffected (yaw is otherwise always encoded as "
+             "0/'not available'). Requires an authorized EK3_SRC1_YAW=2 parameter change on the "
+             "Pixhawk before this actually affects EKF fusion -- this flag alone only changes what is "
+             "transmitted, never any Pixhawk parameter.",
+    )
     parser.add_argument("--gps-input-static-test", action="store_true", help="Send static GPS_INPUT data independent of JSBSim CSV")
     parser.add_argument("--gps-input-static-lat", type=float, default=32.5378885, help="Static GPS_INPUT latitude")
     parser.add_argument("--gps-lat", dest="gps_input_static_lat", type=float, default=argparse.SUPPRESS, help="Alias for --gps-input-static-lat")
@@ -1138,8 +1240,43 @@ def parse_args():
     parser.add_argument("--attitude-inject", action="store_true", help="Transmit synthetic display attitude as MAVLink NAMED_VALUE_FLOAT")
     parser.add_argument("--att-roll-deg", type=float, default=0.0, help="Synthetic display roll angle in degrees")
     parser.add_argument("--att-pitch-deg", type=float, default=0.0, help="Synthetic display pitch angle in degrees")
-    parser.add_argument("--att-yaw-deg", type=float, default=0.0, help="Synthetic display yaw angle in degrees")
+    parser.add_argument("--att-yaw-deg", type=float, default=0.0, help="Synthetic display yaw angle in degrees. Ignored if --mission-heading-from is given.")
     parser.add_argument("--attitude-rate-hz", type=float, default=10.0, help="Synthetic display attitude transmit rate")
+    parser.add_argument(
+        "--mission-heading-from", default=None,
+        help=(
+            "HIL-F23-D1: QGC WPL 110 mission file to derive release heading from "
+            "(great-circle initial bearing from --gps-input-static-lat/lon, the release "
+            "position, to the mission's first real NAV_WAYPOINT after skipping seq0/home, "
+            "NAV_TAKEOFF, DO_CHANGE_SPEED, NAV_DELAY, and any other non-NAV_WAYPOINT item). "
+            "When given, this ONE computed bearing replaces --att-yaw-deg for the static "
+            "display-attitude injector, and (only if --release-groundspeed-mps is ALSO "
+            "given) replaces --gps-input-static-vn/ve. It only affects the STATIC/no-live-"
+            "feed code paths -- with --jsbsim-state-input active, live feed data (lat/lon/"
+            "alt/vn/ve/vd/yaw) always wins; the mission bearing only seeds the initial/"
+            "target reference for the informational alignment check below."
+        ),
+    )
+    parser.add_argument(
+        "--release-groundspeed-mps", type=float, default=None,
+        help=(
+            "Groundspeed used with --mission-heading-from to compute static-test GPS_INPUT "
+            "vn/ve (vn=groundspeed*cos(bearing), ve=groundspeed*sin(bearing)). Deliberately "
+            "separate from any airspeed value -- groundspeed is NOT assumed equal to TAS "
+            "when wind is present. If omitted, --gps-input-static-vn/ve keep their existing "
+            "(possibly manual) values even when --mission-heading-from is given."
+        ),
+    )
+    parser.add_argument(
+        "--alignment-check", action="store_true",
+        help=(
+            "HIL-F23-D1: with --mission-heading-from, periodically print the wrapped "
+            "angular error between the target mission bearing and the Pixhawk's own "
+            "reported AHRS2 yaw. INFORMATIONAL ONLY -- never gates or blocks anything. "
+            "Enforcement (e.g. blocking AUTO/RATO progression) is explicitly out of scope "
+            "until a coherent HIL sensor/EKF injection path exists end-to-end."
+        ),
+    )
     parser.add_argument("--log", default=default_log_path(), help="CSV log path")
     parser.add_argument(
         "--no-actuator-output",
@@ -1242,6 +1379,7 @@ def make_row(
     local_position_ned = latest.get("LOCAL_POSITION_NED")
     global_position = latest.get("GLOBAL_POSITION_INT")
     vfr_hud = latest.get("VFR_HUD")
+    gps_raw = latest.get("GPS_RAW_INT")
 
     row = {
         "time_iso": datetime.now(timezone.utc).isoformat(),
@@ -1277,6 +1415,19 @@ def make_row(
     row["airspeed_mps"] = getattr(vfr_hud, "airspeed", "")
     row["groundspeed_mps"] = getattr(vfr_hud, "groundspeed", "")
     row["throttle_pct"] = getattr(vfr_hud, "throttle", "")
+    # HIL-F23-F2B2A: VFR_HUD.alt and GPS_RAW_INT.alt were requested/used
+    # ad-hoc in print_pixhawk_nav_compare() but never actually persisted
+    # to the CSV log -- needed to compare GPS-path altitude (GPS_RAW_INT)
+    # against the EKF-fused altitude (GLOBAL_POSITION_INT/VFR_HUD) for the
+    # altitude-ramp test.
+    row["vfr_alt_m"] = getattr(vfr_hud, "alt", "")
+    row["gps_raw_alt_m"] = getattr(gps_raw, "alt", "") / 1000.0 if gps_raw is not None else ""
+    row["gps_raw_fix_type"] = getattr(gps_raw, "fix_type", "")
+    # HIL-F23-F2B3: needed for the combined nav-profile test's per-phase
+    # "commanded vs GPS_RAW lat/lon/alt" comparison (F2B2A only added
+    # gps_raw_alt_m/fix_type; lat/lon were still missing).
+    row["gps_raw_lat_deg"] = getattr(gps_raw, "lat", "") / 1.0e7 if gps_raw is not None else ""
+    row["gps_raw_lon_deg"] = getattr(gps_raw, "lon", "") / 1.0e7 if gps_raw is not None else ""
     row.update(jsbsim_row if jsbsim_row is not None else blank_jsbsim_row())
     row.update(gps_input_row if gps_input_row is not None else blank_gps_input_log_row())
     row.update(airspeed_input_row if airspeed_input_row is not None else blank_airspeed_log_row())
@@ -1302,6 +1453,26 @@ def print_ahrs_observer(row):
         f"ahrs2_roll={row['ahrs2_roll_rad']} ahrs2_pitch={row['ahrs2_pitch_rad']} "
         f"ahrs2_yaw={row['ahrs2_yaw_rad']} ekf_flags={row['ekf_flags']} "
         f"pos_ned=({row['local_ned_x_m']},{row['local_ned_y_m']},{row['local_ned_z_m']})"
+    )
+
+
+def print_alignment_check(row, mission_heading_result):
+    """HIL-F23-D1: INFORMATIONAL ONLY. Compares the mission-derived target
+    bearing against the Pixhawk's own reported AHRS2 yaw. Never gates or
+    blocks anything -- enforcement is explicitly out of scope until a
+    coherent HIL sensor/EKF injection path exists end-to-end (see
+    --alignment-check help text).
+    """
+    ahrs2_yaw_rad = row.get("ahrs2_yaw_rad", "")
+    target_deg = mission_heading_result.bearing_0_360_deg
+    if ahrs2_yaw_rad == "" or ahrs2_yaw_rad is None:
+        print(f"ALIGNMENT_CHECK target_bearing_deg={target_deg:.3f} ahrs2_yaw=(no data yet) informational_only=1 enforced=0")
+        return
+    ahrs2_yaw_deg = math.degrees(ahrs2_yaw_rad)
+    error_deg = sr75_mission_heading.wrap_angle_error_deg(target_deg, ahrs2_yaw_deg)
+    print(
+        f"ALIGNMENT_CHECK target_bearing_deg={target_deg:.3f} ahrs2_yaw_deg={ahrs2_yaw_deg:.3f} "
+        f"wrapped_error_deg={error_deg:+.3f} informational_only=1 enforced=0"
     )
 
 
@@ -1354,6 +1525,59 @@ def print_pixhawk_nav_compare(row, latest):
 def main():
     args = parse_args()
     print(SAFETY_WARNING.strip())
+
+    # HIL-F23-D1: compute the mission-derived release heading FIRST (pure
+    # computation, no hardware dependency) -- this is the earliest possible
+    # point in the startup sequence, matching the ordering principle from
+    # the HIL-F23-D audit (heading must be known before anything else that
+    # depends on it, including the static display-attitude/GPS-velocity
+    # values set up below). Overrides args.att_yaw_deg and (only if
+    # --release-groundspeed-mps is also given) args.gps_input_static_vn/ve
+    # in place, so every existing downstream construction path below picks
+    # up the mission-derived values with no further changes -- and so that
+    # when --mission-heading-from is absent, args.att_yaw_deg/
+    # gps_input_static_vn/ve keep their prior manual behavior exactly.
+    mission_heading_result = None
+    if args.mission_heading_from:
+        mission_heading_result = sr75_mission_heading.compute_mission_heading(
+            args.mission_heading_from, args.gps_input_static_lat, args.gps_input_static_lon,
+        )
+        print("")
+        print("=== HIL-F23-D1 mission-derived heading ===")
+        print(
+            f"selected mission item: seq={mission_heading_result.item.seq} "
+            f"command={mission_heading_result.item.command} (NAV_WAYPOINT)"
+        )
+        print(f"  lat={mission_heading_result.item.lat:.7f} lon={mission_heading_result.item.lon:.7f} alt={mission_heading_result.item.alt:.1f}m")
+        print(f"release coordinates: lat={mission_heading_result.release_lat:.7f} lon={mission_heading_result.release_lon:.7f}")
+        print(f"bearing (0..360): {mission_heading_result.bearing_0_360_deg:.6f} deg")
+        print(f"signed yaw (-180..180): {mission_heading_result.bearing_signed_deg:.6f} deg")
+        print(f"source: {mission_heading_result.source}")
+        args.att_yaw_deg = mission_heading_result.bearing_0_360_deg
+        print(f"--att-yaw-deg overridden to mission-derived bearing: {args.att_yaw_deg:.6f} deg")
+        if args.release_groundspeed_mps is not None:
+            vn, ve = mission_heading_result.vn_ve(args.release_groundspeed_mps)
+            args.gps_input_static_vn = vn
+            args.gps_input_static_ve = ve
+            print(
+                f"--gps-input-static-vn/ve overridden from mission bearing at "
+                f"groundspeed={args.release_groundspeed_mps:.2f} m/s (groundspeed, NOT "
+                f"assumed == TAS): vn={vn:.4f} m/s ve={ve:.4f} m/s"
+            )
+        else:
+            print(
+                "--release-groundspeed-mps not given: --gps-input-static-vn/ve left "
+                f"unchanged (vn={args.gps_input_static_vn:.4f} ve={args.gps_input_static_ve:.4f})"
+            )
+        print(
+            "NOTE: this mission-derived heading only affects the STATIC display-attitude/"
+            "GPS-velocity code paths. With --jsbsim-state-input active, live feed data "
+            "(lat/lon/alt/vn/ve/vd/yaw) always takes priority -- the mission bearing only "
+            "seeds the --alignment-check target reference, never overrides live flight data."
+        )
+        print("=== end mission-derived heading ===")
+        print("")
+
     if args.no_actuator_output:
         print("Actuator/JSBSim output: DISABLED")
     else:
@@ -1404,6 +1628,7 @@ def main():
             args.gps_input_id,
             args.gps_input_ignore_flags,
             args.gps_input_debug,
+            send_yaw=args.gps_input_send_yaw,
         )
     else:
         print("GPS_INPUT injection: DISABLED")
@@ -1527,6 +1752,12 @@ def main():
                 if jsb_state_feeder is not None and (gps_input_due or airspeed_due or attitude_due):
                     jsb_feed_send_row = jsb_state_feeder.read_latest(args)
                     jsb_state_feeder.maybe_print_stale()
+                    if jsb_state_feeder.is_stale():
+                        # HIL-F23-E1: never transmit a stale (no-longer-advancing)
+                        # JSBSim row -- read_latest() would otherwise keep
+                        # returning the last valid row forever. Treat stale
+                        # exactly like "no row yet": nothing is sent this cycle.
+                        jsb_feed_send_row = None
                 if airspeed_injector is not None and airspeed_due:
                     if jsb_state_feeder is None or jsb_feed_send_row is not None:
                         airspeed = safe_float(jsb_feed_send_row, "jsb_airspeed_mps") if jsb_feed_send_row is not None else None
@@ -1648,10 +1879,14 @@ def main():
                     print_jsbsim_status(row)
                 if args.gps_input_inject or args.hil_inject or jsb_state_feeder is not None:
                     print_pixhawk_nav_compare(row, latest)
+                if args.alignment_check and mission_heading_result is not None:
+                    print_alignment_check(row, mission_heading_result)
                 next_print = now + 1.0
 
             time.sleep(0.002)
 
+    if jsb_state_feeder is not None:
+        print(f"JSB_FEED_MAX_STALE_GAP_S={jsb_state_feeder.max_observed_gap_s:.3f}")
     print("SR-75 Layer 2 bridge skeleton stopped.")
     return 0
 

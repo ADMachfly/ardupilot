@@ -28,6 +28,7 @@
 #include <AP_Baro/AP_Baro.h>
 
 #include <AP_BoardConfig/AP_BoardConfig.h>
+#include <AP_InternalError/AP_InternalError.h>
 
 extern const AP_HAL::HAL& hal;
 
@@ -84,6 +85,16 @@ void SIMState::update()
         AP::sitl()->init();
         init_done = true;
         sitl_model = SITL::AP_SIM_FRAME_CLASS::create(AP_SIM_FRAME_STRING);
+        if (sitl_model == nullptr) {
+            // HIL-F24-N: create() can fail (e.g. heap exhaustion for a
+            // large model). Fail safely with a logged internal error
+            // instead of letting _fdm_input_step() dereference a null
+            // sitl_model below on every subsequent tick.
+            INTERNAL_ERROR(AP_InternalError::error_t::mem_guard);
+        }
+    }
+    if (sitl_model == nullptr) {
+        return;
     }
 
     _fdm_input_step();

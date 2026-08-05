@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<initialize name="SR75 Layer 2D-F22 45 m/s rail-release IC (F22-GZ-N)">
+  <!--
+    F22-GZ-N: same launch site/attitude convention as
+    f22gz_release_state_init.xml (F22-GZ-K/L), but with ubody raised from
+    the original ~9.56 m/s Gazebo capture to the F22-GZ-M sweep's
+    recommended practical release speed, 45 m/s.
+
+    Note on provenance: the F22-GZ-N Gazebo rail extension (17.5m
+    one-directional prismatic travel, detach window 17.0-17.3m) was built
+    and run to reach this speed, but its actual captured release speed at
+    detach was 35.87 m/s, short of the 45 m/s target; the joint's
+    damping=50 term (a small stabilizer at the original short rail's low
+    speeds) becomes a materially significant velocity-proportional drag
+    force at these higher speeds/longer travel, an issue flagged rather
+    than silently absorbed. Per the task's explicit instruction this IC
+    uses ubody=45.0 (the F22-GZ-M sweep's recommended value) directly,
+    not the Gazebo run's actual 35.87 m/s output.
+
+    phi/theta/psi = 0/20/315 are the intended physical launch attitude
+    (rail elevation/azimuth), matching the rail's design orientation, not
+    a raw Gazebo Euler readout (see f22gz_release_state_init.xml for why
+    those differ). p/q/r=0 are inferred from the rail joint's rotation
+    lock, same reasoning as f22gz_release_state_init.xml.
+  -->
+  <latitude unit="DEG">32.5378147</latitude>
+  <longitude unit="DEG">74.3661871</longitude>
+  <altitude unit="M">3000.35</altitude>
+  <ubody unit="M/SEC">45.0</ubody>
+  <vbody unit="M/SEC">0.0</vbody>
+  <wbody unit="M/SEC">0.0</wbody>
+  <psi unit="DEG">315.0</psi>
+  <phi unit="DEG">0.0</phi>
+  <theta unit="DEG">20.0</theta>
+  <p unit="RAD/SEC">0.0</p>
+  <q unit="RAD/SEC">0.0</q>
+  <r unit="RAD/SEC">0.0</r>
+</initialize>

@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<initialize name="SR75 Layer 2D-F22 true ground-launch rail start">
+  <!--
+    True zero-speed launcher IC for the F22 RATO ground-launch test, as
+    distinct from the flying layer2j_b3_cruise_trim_init used by F21
+    (TAS=69 m/s). Site altitude matches the F21 mission's home/waypoint
+    altitude (3000 m) and lat/lon/yaw match the rest of the layer2j_b3_*/
+    F21 family for continuity. Rail pitch is 20deg (mid of the requested
+    15-25deg band), matching MAV_CMD_NAV_TAKEOFF's pitch=20.0 parameter in
+    SR75_LAYER2D_F21_AUTO_TAKEOFF.waypoints and rato_init.xml's theta.
+
+    Velocity is given in BODY axes (ubody/vbody/wbody = 0), not wind axes
+    (vt/gamma/alpha). At true zero airspeed the wind-axis triple is
+    degenerate (no velocity vector to define alpha/gamma against), and
+    JSBSim's FGInitialCondition was observed to collapse theta to 0
+    regardless of the requested value whenever vt=0 was combined with
+    vt/gamma/alpha; confirmed via JSBSim CSV output showing
+    attitude/theta-deg=0 at t=0 with both gamma=0 and gamma=20 tried. The
+    body-axis form (matching Tools/autotest/aircraft/arducopter/initfile.xml's
+    pattern) sets phi/theta/psi directly with no velocity-vector coupling.
+  -->
+  <latitude unit="DEG">32.5378085</latitude>
+  <longitude unit="DEG">74.3661944</longitude>
+  <altitude unit="M">3000.0</altitude>
+  <ubody unit="M/SEC">0.0</ubody>
+  <vbody unit="M/SEC">0.0</vbody>
+  <wbody unit="M/SEC">0.0</wbody>
+  <psi unit="DEG">315.0</psi>
+  <phi unit="DEG">0.0</phi>
+  <theta unit="DEG">20.0</theta>
+  <p unit="RAD/SEC">0.0</p>
+  <q unit="RAD/SEC">0.0</q>
+  <r unit="RAD/SEC">0.0</r>
+</initialize>

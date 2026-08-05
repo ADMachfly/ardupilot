@@ -1132,9 +1132,27 @@ def write_b3_time_discontinuity_abort(
         writer.writerow(row)
 
 
+# HIL-F24-B item 6: minimal destination-abstraction preset. Selecting a
+# profile only changes the UDP bind address this process requests -- it
+# never opens an interface, starts PPP, or requires PPP hardware to be
+# present. "ppp" is the documented SR-75 PPP-over-TELEM1 host IP from
+# Tools/autotest/sr75_hil_layer2/ppp/README.md; "loopback" matches
+# SIM_JSON's own built-in default target (127.0.0.1).
+TRANSPORT_PROFILES = {
+    "loopback": "127.0.0.1",
+    "ppp": "192.168.144.2",
+}
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SR-75 host-side SIM_JSON UDP responder")
     parser.add_argument("--listen-host", default="0.0.0.0")
+    parser.add_argument(
+        "--transport-profile", choices=sorted(TRANSPORT_PROFILES), default=None,
+        help="Convenience preset for --listen-host (loopback=127.0.0.1, ppp=192.168.144.2). "
+             "Only applied when --listen-host is left at its default; does not touch any "
+             "interface or require PPP hardware. An explicit --listen-host always wins.",
+    )
     parser.add_argument("--listen-port", type=int, default=9002)
     parser.add_argument("--state-file", default=DEFAULT_STATE_FILE)
     parser.add_argument("--rate-limit-hz", type=float, default=0.0, help="Maximum reply rate; 0 disables limiting")
@@ -2034,6 +2052,10 @@ def print_b3_startup_scoring_debug(request_count: int, diagnostic: Dict[str, obj
 
 def main() -> int:
     args = build_arg_parser().parse_args()
+    # HIL-F24-B: apply the transport-profile preset only if --listen-host
+    # was left at its default -- an explicit --listen-host always wins.
+    if args.transport_profile and args.listen_host == "0.0.0.0":
+        args.listen_host = TRANSPORT_PROFILES[args.transport_profile]
     try:
         actuator_channel_map = build_actuator_channel_map(args)
     except ActuatorMapError as exc:

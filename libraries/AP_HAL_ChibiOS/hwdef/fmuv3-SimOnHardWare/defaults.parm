@@ -1,0 +1,90 @@
+# =============================================================================
+# SIMULATION FIRMWARE default parameters -- fmuv3-SimOnHardWare (SR-75 HIL)
+#
+# Every non-default value below is commented with why it differs from a
+# stock fmuv3 ArduPlane build. Do NOT copy this file onto the real bench's
+# flight-config firmware, and do NOT flash this firmware+params combination
+# onto a board with real engine/fuel/RATO/servo loads connected.
+#
+# This file intentionally does NOT reuse the bench's existing
+# SR75_LAYER2_AM2_HIL_SAFE.param blindly (HIL-F24-B task requirement) --
+# that file targets the *normal* fmuv3 firmware talking GPS_INPUT over
+# MAVLink; this file targets a structurally different firmware image whose
+# whole point is coherent EKF3 fusion of simulated sensors, so it needs a
+# different EKF/GPS/airspeed source configuration from first principles.
+# =============================================================================
+
+# --- Estimator: use EKF3 for real, do not bypass it ---------------------
+# The existing CubeOrange-SimOnHardWare precedent's defaults.parm uses
+# AHRS_EKF_TYPE=10 (AP_AHRS::EKFType::SIM), which reads JSBSim's *true*
+# state directly and bypasses EKF3 fusion entirely. SR-75's whole purpose
+# for this target is to validate EKF3 actually fusing simulated sensors,
+# so this must be 3 (EKF3), not 10. See HIL-F24-A/B reports.
+AHRS_EKF_TYPE 3
+EK3_ENABLE 1
+
+# --- Simulated sensor backends (compiled in via AP_SIM_ENABLED=1, see
+# SimOnHW.inc) ------------------------------------------------------------
+# GPS_TYPE_SITL = 100 (libraries/AP_GPS/AP_GPS.h). This is DIFFERENT from
+# the bench's normal fmuv3 firmware, which uses GPS1_TYPE=14 (MAVLink/
+# GPS_INPUT) -- that backend is not what feeds sensors on this firmware.
+# On a NON-SoH build, GPS1_TYPE=100 would silently fail (the SITL GPS
+# backend isn't compiled in); on THIS build it is the correct, intended
+# value because AP_SIM_GPS_ENABLED=1.
+GPS1_TYPE 100
+# ARSPD_TYPE_SITL = 100 (libraries/AP_Airspeed/AP_Airspeed.h). The SIM_JSON
+# backend (libraries/SITL/SIM_JSON.cpp sim_defaults[]) already sets this as
+# a runtime *default* at first construction; set explicitly here too so the
+# safety-relevant configuration is visible in this file, not only in code.
+ARSPD_TYPE 100
+# Barometer and compass have no dedicated *_TYPE SITL enum to set here --
+# AP_Baro_SITL / AP_Compass_SITL register automatically whenever
+# AP_SIM_ENABLED=1 (see AP_Baro_config.h / AP_Compass_config.h), the same
+# way the real I2C/SPI baro/compass drivers would on a normal fmuv3 build.
+# Barometer pressure is derived internally from the SIM_JSON `altitude`
+# field via a standard-atmosphere model; magnetic field is computed
+# internally from position+attitude (SIM_JSON carries neither directly --
+# see the SIM_JSON field-mapping table in the HIL-F24-B report).
+
+# --- Telemetry / transport ------------------------------------------------
+# USB (SERIAL0) is unaffected by any of the above -- it stays plain
+# MAVLink2 for Mission Planner, exactly as on the bench's normal firmware.
+# TELEM1 (SERIAL1) carries the SIM_JSON UDP stream over PPP, reusing the
+# exact, already-validated parameter set from
+# Tools/autotest/sr75_hil_layer2/ppp/README.md's
+# SR75_SoH_JSON_PPP_TELEM1.param (not re-derived here, same values):
+NET_ENABLE 1
+NET_OPTIONS 0
+SERIAL1_PROTOCOL 48
+SERIAL1_BAUD 921
+SERIAL1_OPTIONS 0
+BRD_SER1_RTSCTS 0
+
+# --- Default flight mode / arming posture --------------------------------
+# Boot into MANUAL (mode 0) by default. Arming checks are left at their
+# strict compiled-in defaults (not weakened here) -- this file does not set
+# ARMING_CHECK or ARMING_REQUIRE, so normal pre-arm safety gating still
+# applies in full; nothing here makes the vehicle easier to arm.
+FLTMODE1 0
+FLTMODE2 0
+FLTMODE3 0
+FLTMODE4 0
+FLTMODE5 0
+FLTMODE6 0
+
+# --- RATO / propulsion / ejection: explicitly safe, not merely default --
+# These already default to 0/disabled at compile time (see
+# ArduPlane/rato.cpp's AP_GROUPINFO defaults) -- set explicitly here so the
+# safety posture is visible in this file rather than relying on an
+# unstated compiled-in default. This firmware is for sensor-fusion
+# validation, not RATO/actuator testing.
+RATO_ENABLE 0
+RATO_IGN_CH 0
+RATO_EJ_CH 0
+SERVO7_FUNCTION 0
+SERVO8_FUNCTION 0
+
+# --- Battery monitor -------------------------------------------------------
+# No battery telemetry is wired to this bench configuration; disable the
+# monitor rather than reporting a stale/fake reading.
+BATT_MONITOR 0

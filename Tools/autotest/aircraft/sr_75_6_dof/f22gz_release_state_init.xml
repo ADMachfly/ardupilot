@@ -1,0 +1,51 @@
+<?xml version="1.0"?>
+<initialize name="SR75 Layer 2D-F22 Gazebo detachable-rail release-state IC">
+  <!--
+    F22-GZ-L: IC derived from the Gazebo detachable-rail launcher's
+    captured release state at detach (F22-GZ-K/L), NOT a from-rest
+    ground-launch IC like f22_ground_launch_init.xml. This represents
+    the aircraft's state at the instant it separates from the rail
+    carriage in the Gazebo model (~9.56 m/s along the rail axis), so
+    JSBSim/ArduPilot can be started from where Gazebo's launcher leaves
+    off instead of from zero speed.
+
+    lat/lon/alt are the F22 JSBSim launch site (32.5378085/74.3661944/
+    3000m, used throughout the F21/F22 family) offset by the release
+    position Gazebo reported relative to its own rail-carriage spawn
+    point, converted via a flat-earth approximation assuming Gazebo
+    world +Y=North/+X=East (the convention established in F22-GZ-E).
+    This mapping is an ASSUMED correspondence between the two
+    simulators' coordinate frames, not a calibrated one; there is no
+    verified link between Gazebo's arbitrary test-world origin and this
+    JSBSim mission's real launch site.
+
+    phi/theta/psi = 0/20/315 are the intended physical launch attitude
+    (rail elevation/azimuth), NOT the raw Gazebo Euler readout at detach
+    (90/70/135 deg), which is an artifact of how the Gazebo scene's
+    coordinate frame was set up to point the rail axis correctly and is
+    not itself a physical attitude.
+
+    Velocity is given in BODY axes (ubody/vbody/wbody), matching
+    f22_ground_launch_init.xml's fix for the same reason: at nonzero but
+    still low airspeed, using vt/gamma/alpha risks the same theta-vs-
+    alpha/gamma coupling that silently collapsed theta to 0 in earlier
+    testing. Gazebo's release velocity was purely along the rail axis
+    (cross-axis component ~0), and by rail-launch convention the body
+    X-axis points along the launch direction, so this is pure ubody with
+    vbody=wbody=0. p/q/r=0 are INFERRED (not measured) from the
+    prismatic+DetachableJoint constraint, which permits no relative
+    rotation before detach; see F22-GZ-K for the caveat.
+  -->
+  <latitude unit="DEG">32.5378147</latitude>
+  <longitude unit="DEG">74.3661871</longitude>
+  <altitude unit="M">3000.35</altitude>
+  <ubody unit="M/SEC">9.56</ubody>
+  <vbody unit="M/SEC">0.0</vbody>
+  <wbody unit="M/SEC">0.0</wbody>
+  <psi unit="DEG">315.0</psi>
+  <phi unit="DEG">0.0</phi>
+  <theta unit="DEG">20.0</theta>
+  <p unit="RAD/SEC">0.0</p>
+  <q unit="RAD/SEC">0.0</q>
+  <r unit="RAD/SEC">0.0</r>
+</initialize>
