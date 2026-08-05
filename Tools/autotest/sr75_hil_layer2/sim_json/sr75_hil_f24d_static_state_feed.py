@@ -18,7 +18,9 @@ file passed via --output.
 """
 import argparse
 import csv
+import os
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
@@ -68,6 +70,42 @@ def build_static_row(t_s, lat_deg=BASE_LAT, lon_deg=BASE_LON, alt_m=BASE_ALT_M,
     }
 
 
+def atomic_write_csv_snapshot(path, fieldnames, row):
+    """HIL-F24-P: (re)write a single-row CSV snapshot atomically.
+
+    The previous implementation opened `path` with mode "w" (truncating it
+    immediately) and then wrote the header and the data row as two separate
+    writes. A concurrent reader (LatestCSVReader.read_latest(), used by
+    sr75_sim_json_responder.py) could observe the file in between any of
+    those steps: freshly truncated (empty -- "no CSV header"), header-only
+    ("no complete data rows"), or a torn/partial row. This is exactly the
+    feeder/responder race seen on the bench (HIL-F24-P).
+
+    Instead, the complete header + row is written to a temporary file in
+    the *same directory* as `path` (so the final os.replace() is a rename
+    within one filesystem, which POSIX guarantees is atomic), flushed and
+    fsynced, then swapped into place. A reader opening `path` at any point
+    in time therefore only ever observes either the previous complete
+    snapshot or the new complete snapshot -- never a partial one.
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".state_csv_", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as tmp_file:
+            writer = csv.DictWriter(tmp_file, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerow(row)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def build_arg_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--output", required=True, help="CSV path to (re)write; matches responder --state-file")
@@ -92,11 +130,7 @@ def main():
     for i in range(n_writes):
         t_s = time.monotonic() - start
         row = build_static_row(t_s, args.lat_deg, args.lon_deg, args.alt_m, args.yaw_deg, args.airspeed_mps)
-        with open(args.output, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-            writer.writeheader()
-            writer.writerow(row)
-            f.flush()
+        atomic_write_csv_snapshot(args.output, CSV_FIELDS, row)
         next_write = start + (i + 1) * dt
         sleep_s = next_write - time.monotonic()
         if sleep_s > 0:

@@ -155,6 +155,22 @@ class StateError(Exception):
     """Raised when state cannot be converted to a valid SIM_JSON reply."""
 
 
+class StateFileNotReadyError(StateError):
+    """HIL-F24-P: the state file does not exist yet. Expected transiently
+    at startup, before the feeder's first atomic snapshot write has
+    landed -- distinct from StateFileMalformedError, which means the file
+    exists but was caught mid-write."""
+
+
+class StateFileMalformedError(StateError):
+    """HIL-F24-P: the state file exists but is transiently incomplete (its
+    header row is missing, or it has no complete data row yet). With the
+    feeder's atomic-replace fix this should not happen in normal operation,
+    but the responder still treats it as a retryable, retainable condition
+    rather than a fatal one, in case of a non-atomic writer or a reader
+    racing an external filesystem hiccup."""
+
+
 class StateEnvelopeError(Exception):
     """Raised when B3 bounded-test state exceeds the allowed safety envelope."""
 
@@ -357,11 +373,11 @@ class LatestCSVReader:
             self.headers = next(csv.reader(csv_file), None)
         self._header_mtime_ns = stat.st_mtime_ns
         if not self.headers:
-            raise StateError(f"{self.path} has no CSV header")
+            raise StateFileMalformedError(f"{self.path} has no CSV header")
 
     def read_latest(self) -> Tuple[Dict[str, str], str, float]:
         if not os.path.exists(self.path):
-            raise StateError(f"state file does not exist: {self.path}")
+            raise StateFileNotReadyError(f"state file does not exist: {self.path}")
         self._load_headers()
         assert self.headers is not None
         stat = os.stat(self.path)
@@ -373,7 +389,7 @@ class LatestCSVReader:
             data = csv_file.read(block_size).decode("utf-8", errors="ignore")
         lines = [line for line in data.splitlines() if line.strip()]
         if len(lines) < 2:
-            raise StateError(f"{self.path} has no complete data rows")
+            raise StateFileMalformedError(f"{self.path} has no complete data rows")
         for line in reversed(lines[1:]):
             parsed = list(csv.reader([line]))
             if not parsed:
@@ -382,7 +398,7 @@ class LatestCSVReader:
             if len(values) == len(self.headers):
                 row = dict(zip(self.headers, values))
                 return row, line, stat.st_mtime
-        raise StateError(f"{self.path} has no complete data rows")
+        raise StateFileMalformedError(f"{self.path} has no complete data rows")
 
 
 class StateMapper:
@@ -393,6 +409,31 @@ class StateMapper:
         self.last_source_timestamp: Optional[float] = None
         self.last_outgoing_timestamp: Optional[float] = None
         self.last_signature: Optional[str] = None
+        # HIL-F24-P: last successfully accepted state, retained so a
+        # transient state-file read/parse race can still be answered with
+        # a valid reply instead of being skipped outright. Also counts and
+        # deduplicates state-read-error logging (see note_state_read_error()).
+        self.last_valid_state: Optional[SimState] = None
+        self.state_read_error_count: int = 0
+        self._last_logged_state_read_error: Optional[str] = None
+
+    def note_state_read_error(self, message: str) -> bool:
+        """Count a state-file read/parse error and report whether it is
+        new (differs from the last logged message) and therefore worth
+        printing. Repeated identical messages (e.g. the same feeder write
+        race hit on several consecutive requests) are counted every time
+        but logged only once, until either a different message occurs or
+        a fresh successful read re-arms logging via
+        clear_state_read_error_dedup()."""
+        self.state_read_error_count += 1
+        is_new = message != self._last_logged_state_read_error
+        if is_new:
+            self._last_logged_state_read_error = message
+        return is_new
+
+    def clear_state_read_error_dedup(self) -> None:
+        """Re-arm state-read-error logging after a successful read."""
+        self._last_logged_state_read_error = None
 
     def _missing_required(self, name: str, missing: List[str]) -> None:
         missing.append(name)
@@ -583,6 +624,7 @@ class StateMapper:
         self.last_signature = state.row_signature
         self.last_source_timestamp = state.source_timestamp_s
         self.last_outgoing_timestamp = state.timestamp_s
+        self.last_valid_state = state
 
 
 class MockStateSource:
@@ -1989,7 +2031,38 @@ def read_reply_state(
 
     deadline = time.monotonic() + max(0.0, args.fresh_state_wait_ms) / 1000.0
     while True:
-        row, signature, mtime = reader.read_latest()
+        try:
+            row, signature, mtime = reader.read_latest()
+        except (StateFileNotReadyError, StateFileMalformedError) as exc:
+            # HIL-F24-P: a transient state-file read/parse race (e.g. the
+            # feeder caught mid-write) must not silently drop this reply.
+            # If we already have a previously accepted valid state, retain
+            # and re-serve it (nudging its outgoing timestamp forward the
+            # same way the --allow-state-reuse path below does, so it never
+            # duplicates or goes backward) instead of skipping the reply.
+            # Only propagate the error -- which causes the caller to skip
+            # replying, as before HIL-F24-P -- if no valid state has ever
+            # been seen yet (true cold start, before the feeder's first
+            # snapshot write has landed).
+            is_new = mapper.note_state_read_error(str(exc))
+            kind = "STATE_NOT_READY" if isinstance(exc, StateFileNotReadyError) else "STATE_FILE_MALFORMED"
+            if mapper.last_valid_state is not None:
+                if is_new:
+                    print(
+                        f"{kind} (retaining last valid state, "
+                        f"total_state_read_errors={mapper.state_read_error_count}): {exc}"
+                    )
+                retained = replace(mapper.last_valid_state, reused_source_row=True)
+                if mapper.last_outgoing_timestamp is not None and retained.timestamp_s <= mapper.last_outgoing_timestamp:
+                    retained.timestamp_s = mapper.last_outgoing_timestamp + MIN_OUTGOING_TIMESTAMP_STEP_S
+                return retained
+            if is_new:
+                print(
+                    f"{kind} (no valid state yet, "
+                    f"total_state_read_errors={mapper.state_read_error_count}): {exc}"
+                )
+            raise
+        mapper.clear_state_read_error_dedup()
         row_age_ms = (time.time() - mtime) * 1000.0
         if row_age_ms > args.state_timeout_ms:
             raise StateError(f"STALE_STATE: latest row age {row_age_ms:.1f} ms")
@@ -2685,7 +2758,11 @@ def main() -> int:
                 return 3
             except StateError as exc:
                 reason = str(exc)
-                if reason.startswith("STALE_STATE"):
+                if isinstance(exc, (StateFileNotReadyError, StateFileMalformedError)):
+                    # HIL-F24-P: already logged (deduplicated) and counted
+                    # inside read_reply_state() -- avoid printing it twice.
+                    pass
+                elif reason.startswith("STALE_STATE"):
                     print(reason)
                 else:
                     print(f"STATE_ERROR: {reason}")
