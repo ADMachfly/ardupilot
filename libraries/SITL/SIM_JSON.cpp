@@ -473,6 +473,19 @@ void JSON::recv_fdm(const struct sitl_input &input)
         }
 
         position = origin.get_distance_NED_double(new_loc);
+
+        // HIL-F24-R2D: this is the smallest existing signal that proves
+        // a fresh JSON packet with an actual latitude/longitude/altitude
+        // has just been parsed -- the same received_bitmask check that
+        // gates set_start_location() above. Record it (unconditionally,
+        // every real-hardware or desktop tick this branch is taken) so
+        // AP_GPS_SITL can gate/withdraw its 3D fix on it without ever
+        // touching home_is_set, which update_home() can latch true from
+        // the compiled-in default location before this branch first runs.
+        if (sitl != nullptr) {
+            sitl->json_position_valid = true;
+            sitl->json_position_last_update_ms = AP_HAL::millis();
+        }
     } else {
         position = state.position;
         position.xy() += origin.get_distance_NE_double(home);

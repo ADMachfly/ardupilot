@@ -36,6 +36,17 @@
 
 const AP_HAL::HAL& hal = AP_HAL::get_HAL();
 
+// HIL-F24-R2D: provides the SITL::SIM singleton (AP::sitl()) for this
+// binary. Global/static storage duration, so its plain (non-AP_Param)
+// members -- including the new json_position_valid/json_position_last_
+// update_ms fields -- are zero-initialized before any test runs, same
+// precedent as libraries/AP_GPS/examples/GPS_AUTO_test/GPS_AUTO_test.cpp.
+// Without this, AP::sitl() returns nullptr in this test binary and
+// SITL::JSON::recv_fdm()'s `if (sitl != nullptr)` guard (SIM_JSON.cpp)
+// means the new fields are never touched -- this makes the tests below
+// exercise that assignment for real instead of skipping it.
+SITL::SIM sitl_singleton;
+
 using namespace SITL;
 
 namespace SITL {
@@ -157,6 +168,88 @@ TEST(JSON, RecvFdmParsesQueuedValidReplyOnUnchangedSitlPath)
     JSONTestAccess::recv_fdm(j, input);
 
     EXPECT_FLOAT_EQ((float)JSONTestAccess::timestamp_s(j), 12.5f);
+}
+
+/*
+    HIL-F24-R2D regression tests: the smallest existing signal proving
+    SIM_JSON has parsed a fresh packet containing latitude, longitude,
+    and altitude is exactly the `received_bitmask & (LATITUDE|LONGITUDE|
+    ALTITUDE)` check already gating set_start_location() in recv_fdm()
+    (SIM_JSON.cpp). These tests confirm that check now also sets
+    AP::sitl()->json_position_valid / json_position_last_update_ms --
+    the fields AP_GPS_SITL::read() (real hardware only) uses to decide
+    whether it may publish a fix -- without a packet lacking position
+    ever doing so, and without touching anything else about how the
+    packet is parsed.
+*/
+TEST(JSON, PacketWithoutPositionDoesNotMarkJsonPositionValid)
+{
+    JSON j("json:127.0.0.1");
+    ASSERT_TRUE(JSONTestAccess::sock(j).bind("127.0.0.1", 39104));
+
+    SocketAPM_native peer(true);
+    // Same minimal payload as RecvFdmParsesQueuedValidReplyOnUnchangedSitlPath
+    // -- deliberately no latitude/longitude/altitude.
+    const char *payload =
+        "{\"timestamp\":12.5,"
+        "\"imu\":{\"gyro\":[0.1,0.2,0.3],\"accel_body\":[0.0,0.0,-9.8]},"
+        "\"velocity\":[1.0,2.0,3.0],"
+        "\"attitude\":[0.0,0.0,0.0]}\n";
+    std::string two_records = std::string(payload) + std::string(payload);
+    ASSERT_GT(peer.sendto(two_records.data(), two_records.size(), "127.0.0.1", 39104), 0);
+
+    struct sitl_input input {};
+    JSONTestAccess::recv_fdm(j, input);
+
+    auto *sitl = AP::sitl();
+    if (sitl != nullptr) {
+        EXPECT_FALSE(sitl->json_position_valid);
+    }
+}
+
+TEST(JSON, PacketWithPositionMarksJsonPositionValidAtSuppliedTruth)
+{
+    auto *sitl = AP::sitl();
+    if (sitl == nullptr) {
+        // No SITL::SIM singleton is linked into this particular test
+        // binary configuration -- SIM_JSON.cpp's `if (sitl != nullptr)`
+        // guard means json_position_valid is never touched either way,
+        // so there is nothing this test can observe. Every other build
+        // configuration that links a SITL::SIM singleton (e.g. a full
+        // vehicle) exercises the assertions below.
+        GTEST_SKIP();
+    }
+    sitl->json_position_valid = false;
+    sitl->json_position_last_update_ms = 0;
+
+    JSON j("json:127.0.0.1");
+    ASSERT_TRUE(JSONTestAccess::sock(j).bind("127.0.0.1", 39105));
+
+    SocketAPM_native peer(true);
+    // Truth position matches HIL-F24-R1's runscript IC (see
+    // Tools/autotest/sr75_hil_layer2/reports/HIL_F24_R2B_ahrs_backend_
+    // diagnosis.md) purely for a recognisable, real-bench-relevant value
+    // -- parse_sensors() has no notion of "truth", it parses whatever
+    // latitude/longitude/altitude the packet contains.
+    const char *payload =
+        "{\"timestamp\":12.5,"
+        "\"imu\":{\"gyro\":[0.1,0.2,0.3],\"accel_body\":[0.0,0.0,-9.8]},"
+        "\"velocity\":[1.0,2.0,3.0],"
+        "\"attitude\":[0.0,0.0,0.0],"
+        "\"latitude\":32.5378085,"
+        "\"longitude\":74.3661944,"
+        "\"altitude\":240.201118}\n";
+    std::string two_records = std::string(payload) + std::string(payload);
+    ASSERT_GT(peer.sendto(two_records.data(), two_records.size(), "127.0.0.1", 39105), 0);
+
+    struct sitl_input input {};
+    JSONTestAccess::recv_fdm(j, input);
+
+    EXPECT_TRUE(sitl->json_position_valid);
+    // AP_HAL::millis() (real hardware's boot-relative clock) and this
+    // test's own wall-clock aren't the same clock, so only confirm that
+    // a timestamp was actually recorded (non-zero), not its exact value.
+    EXPECT_GT(sitl->json_position_last_update_ms, 0u);
 }
 
 AP_GTEST_MAIN()

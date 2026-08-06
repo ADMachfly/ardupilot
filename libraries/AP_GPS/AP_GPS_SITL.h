@@ -34,7 +34,19 @@ public:
 
 private:
 
+    friend class AP_GPS_SITL_Test;
+
     uint32_t last_update_ms;
+
+    // HIL-F24-R2D: pure decision logic, unconditionally compiled (unlike
+    // the `#if CONFIG_HAL_BOARD != HAL_BOARD_SITL` branch in read() that
+    // calls it on real hardware only) so it is directly unit-testable on
+    // desktop SITL -- same pattern as SITL::JSON::recv_fdm_bounded()
+    // (see libraries/SITL/tests/test_sim_json.cpp). Returns true only if
+    // a JSON position has ever been marked valid AND it is not older
+    // than stale_ms.
+    static bool json_position_is_valid(
+        bool position_valid, uint32_t last_position_update_ms, uint32_t now_ms, uint32_t stale_ms);
 };
 
 #endif  // AP_SIM_GPS_ENABLED

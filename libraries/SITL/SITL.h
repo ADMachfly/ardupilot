@@ -189,6 +189,22 @@ public:
     // throttle when motors are active. 0 = 'no throttle', 1 = 'full throttle'
     float throttle;
 
+    // HIL-F24-R2D: set by SITL::JSON::recv_fdm() (SIM_JSON.cpp) the
+    // instant a JSON packet actually containing a fresh latitude,
+    // longitude, and altitude has been parsed -- distinct from
+    // Aircraft::home_is_set, which (on SimOnHardware/real-hardware
+    // builds) can be latched true from the compiled-in default SITL
+    // start location (SIM_OPOS_LAT/LNG, "CMAC"/Canberra) before any real
+    // position has ever arrived, by Aircraft::update_home() racing ahead
+    // of the first successful recv_fdm(). AP_GPS_SITL (real hardware
+    // only -- see AP_GPS_SITL.cpp) uses these two fields, not
+    // home_is_set, to decide whether it is safe to publish a 3D fix, and
+    // to withdraw one if the feed goes stale. Meaningless/unused on
+    // desktop SITL and for every non-JSON aircraft model; only ever
+    // written by JSON::recv_fdm().
+    bool json_position_valid;
+    uint32_t json_position_last_update_ms;
+
     static const struct AP_Param::GroupInfo var_info[];
     static const struct AP_Param::GroupInfo var_info2[];
     static const struct AP_Param::GroupInfo var_info3[];

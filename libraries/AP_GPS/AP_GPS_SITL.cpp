@@ -25,6 +25,27 @@
 
 extern const AP_HAL::HAL& hal;
 
+// HIL-F24-R2D: how long a fix is trusted after the last real JSON
+// latitude/longitude/altitude packet before it is withdrawn (NONE) if
+// SIM_JSON truth stops updating -- generous relative to a single missed
+// receive cycle (JSON_HW_RECV_TIMEOUT_MS in SIM_JSON.cpp is 200ms, and a
+// single bounded-wait timeout there is expected/normal, not a real
+// outage), tight enough to withdraw promptly on a genuine feed stall
+// (e.g. the feeder/responder/PPP link actually going down). Referenced
+// only from the `#if CONFIG_HAL_BOARD != HAL_BOARD_SITL` block in
+// read() below, but left unconditionally compiled/visible (like
+// json_position_is_valid() itself) for the desktop-SITL unit tests.
+static const uint32_t JSON_POSITION_STALE_MS = 2000;
+
+bool AP_GPS_SITL::json_position_is_valid(
+    bool position_valid, uint32_t last_position_update_ms, uint32_t now_ms, uint32_t stale_ms)
+{
+    if (!position_valid) {
+        return false;
+    }
+    return (now_ms - last_position_update_ms) <= stale_ms;
+}
+
 /*
   return GPS time of week in milliseconds
  */
@@ -67,6 +88,26 @@ bool AP_GPS_SITL::read(void)
     last_update_ms = now;
 
     auto *sitl = AP::sitl();
+
+#if CONFIG_HAL_BOARD != HAL_BOARD_SITL
+    // HIL-F24-R2D: on real hardware (SimOnHardware/SIM_JSON boards
+    // only -- this branch compiles out entirely for desktop SITL, see
+    // #if above), never publish a fix built from sitl->state before
+    // SITL::JSON::recv_fdm() has actually parsed a real latitude/
+    // longitude/altitude packet (json_position_valid), and withdraw the
+    // fix again if that feed goes stale. Without this, Aircraft::
+    // update_home() can latch home_is_set (and therefore sitl->state)
+    // to the compiled-in default SITL start location -- ArduPilot's
+    // well-known CMAC/Canberra OPOS default -- on the very first
+    // scheduler tick, before SIM_JSON/PPP has connected at all, and
+    // that default then permanently poisons EKF3's one-shot GPS_GLOBAL_
+    // ORIGIN latch for the rest of the boot (see HIL_F24_R2B_ahrs_
+    // backend_diagnosis.md / HIL_F24_R2D_gps_sitl_fix_gating.md).
+    if (!json_position_is_valid(sitl->json_position_valid, sitl->json_position_last_update_ms, now, JSON_POSITION_STALE_MS)) {
+        state.status = AP_GPS_FixType::NONE;
+        return true;
+    }
+#endif
 
     double latitude =sitl->state.latitude;
     double longitude = sitl->state.longitude;

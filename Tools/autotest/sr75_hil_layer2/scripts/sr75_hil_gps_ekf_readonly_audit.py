@@ -21,13 +21,27 @@ import argparse
 import csv
 import sys
 import time
-from pathlib import Path
 
-# (param_name, required_value_for_GPS_INPUT, note)
+# (param_name, required_value(s), note)
 # required_value is None where "just report the current value" (no single
-# right answer, or already fine at any common default).
+# right answer, or already fine at any common default); it is a tuple where
+# more than one value is legitimately correct, depending on which of this
+# bench's two supported GPS-injection architectures is running.
 CHECKS = [
-    ("GPS1_TYPE", "14", "0=None (default!) blocks AP_GPS_MAV entirely; 14=MAVLink required for GPS_INPUT. Renamed from GPS_TYPE."),
+    # HIL-F24-R2B: GPS1_TYPE=14 (GPS_TYPE_MAV) is required only for the
+    # GPS_INPUT-over-MAVLink architecture this check originally assumed.
+    # The SR-75 bench's actual, current, and confirmed-intentional
+    # architecture instead runs a SIM_ENABLED firmware build (per
+    # HIL-F24-A) whose compiled-in AP_GPS_SITL backend is fed directly by
+    # the SIM_JSON protocol -- selected by GPS1_TYPE=100 (GPS_TYPE_SITL,
+    # libraries/AP_GPS/AP_GPS.h:114, gated `#if AP_SIM_GPS_ENABLED`, a
+    # legitimate enum value, not a leftover/unrecognized one). Treating
+    # 100 as a BLOCKER was a false positive against the architecture
+    # actually in use on this bench -- see HIL_F24_R2B_ahrs_backend_
+    # diagnosis.md. Both values are accepted; anything else still blocks.
+    ("GPS1_TYPE", ("14", "100"),
+     "0=None (default!) blocks AP_GPS_MAV entirely; 14=MAVLink GPS_INPUT; "
+     "100=GPS_TYPE_SITL (compiled-in SIM_ENABLED backend, this bench's actual architecture). Renamed from GPS_TYPE."),
     ("GPS2_TYPE", None, "second GPS instance; irrelevant unless GPS_id=1 is used (bridge default gps_id=0). Renamed from GPS_TYPE2."),
     ("GPS_AUTO_CONFIG", None, "controls auto-config of *serial* GPS receivers only; does not gate MAVLink/GPS_INPUT reception."),
     ("GPS_AUTO_SWITCH", None, "multi-GPS blend/switch policy; irrelevant with a single GPS1_TYPE=MAVLink instance."),
@@ -129,14 +143,15 @@ def main():
     blockers = []
     for name, required, note in CHECKS:
         value = onboard.get(name)
+        accepted = (required,) if isinstance(required, str) else required
         if value is None:
             status = "NO_RESPONSE (param likely absent from this firmware build)"
         elif required is None:
             status = "INFO"
-        elif fmt(value) == required:
+        elif fmt(value) in accepted:
             status = "OK"
         else:
-            status = f"BLOCKER (required={required})"
+            status = f"BLOCKER (required={'/'.join(accepted)})"
             blockers.append(name)
         line = f"{name:16s} = {fmt(value):>6s}  {status}"
         log(line)
