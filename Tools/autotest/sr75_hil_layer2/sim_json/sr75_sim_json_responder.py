@@ -361,33 +361,120 @@ class SimState:
 
 
 class LatestCSVReader:
+    """
+    HIL-F24-S: previously, `read_latest()` combined metadata and content
+    from up to *four separate* filesystem calls against the same pathname
+    (`os.path.exists()`, `_load_headers()`'s own internal `os.stat()` +
+    `open()`, then this method's own `os.stat()` + `open()`) -- each one a
+    distinct syscall that could land on a different snapshot of the file
+    if the feeder's atomic `os.replace()` happened to fire in between any
+    two of them. This is a classic TOCTOU (time-of-check-to-time-of-use)
+    race: the `st_mtime` used to compute "how stale is this row" could
+    come from an *older* snapshot than the row content actually parsed
+    (or vice versa), producing an incorrect age calculation for an
+    otherwise perfectly fresh row -- exactly what happened for request
+    784 in the HIL-F24-S hardware run (STALE_STATE age 1546.5ms, with
+    both neighboring requests 783/785 reporting normal ~5-8ms ages).
+
+    The fix: every `read_latest()` call now opens the file exactly once,
+    takes its metadata via `os.fstat()` on that *same open file
+    descriptor*, and reads both the header and the data from that same
+    descriptor. An open file descriptor always refers to the same inode
+    for its entire lifetime regardless of what `os.replace()` does to the
+    pathname afterward (POSIX unlink-on-rename semantics), so metadata
+    and content are now structurally guaranteed to come from the same
+    atomic snapshot -- there is no longer a second filesystem call that
+    could observe a different one.
+    """
+
     def __init__(self, path: str):
         self.path = path
         self.headers: Optional[List[str]] = None
-        self._header_mtime_ns: Optional[int] = None
+        self._header_cache_key: Optional[Tuple[int, int, int]] = None
+        # HIL-F24-T: identity of the last-seen snapshot and the
+        # time.monotonic() timestamp at which THIS process first observed
+        # it -- see _snapshot_age_s(). Never derived from CLOCK_REALTIME.
+        self._last_snapshot_key: Optional[Tuple[int, int, int, str]] = None
+        self._snapshot_first_observed_monotonic: Optional[float] = None
 
-    def _load_headers(self) -> None:
-        stat = os.stat(self.path)
-        if self.headers is not None and self._header_mtime_ns == stat.st_mtime_ns:
+    def _load_headers(self, csv_file, st: os.stat_result) -> None:
+        """Reads the header row from `csv_file` (already open, positioned
+        anywhere) if `st` (that same file's own os.fstat()) indicates the
+        cached header is stale. `st` -- (dev, ino, mtime_ns) -- is always
+        from the exact same open file descriptor as the row read that
+        follows in read_latest(), so the cache can never be keyed off a
+        different inode than the header actually read (task 3)."""
+        cache_key = (st.st_dev, st.st_ino, st.st_mtime_ns)
+        if self.headers is not None and self._header_cache_key == cache_key:
             return
-        with open(self.path, "r", newline="", encoding="utf-8") as csv_file:
-            self.headers = next(csv.reader(csv_file), None)
-        self._header_mtime_ns = stat.st_mtime_ns
+        csv_file.seek(0)
+        header_line = csv_file.readline().decode("utf-8", errors="ignore")
+        parsed = list(csv.reader([header_line]))
+        self.headers = parsed[0] if parsed else None
+        self._header_cache_key = cache_key
         if not self.headers:
             raise StateFileMalformedError(f"{self.path} has no CSV header")
 
-    def read_latest(self) -> Tuple[Dict[str, str], str, float]:
-        if not os.path.exists(self.path):
+    def _snapshot_age_s(self, st: os.stat_result, line: str) -> float:
+        """HIL-F24-T: monotonic-clock-based freshness age, immune to
+        CLOCK_REALTIME/NTP steps.
+
+        Root cause this replaces: the previous freshness gate computed
+        `time.time() - st.st_mtime` -- both wall-clock (CLOCK_REALTIME)
+        values. A host NTP correction or manual clock step between the
+        feeder's write (which timestamps st_mtime using the wall clock at
+        that instant) and this read (using the wall clock *now*) directly
+        inflates or deflates that difference, with no relationship to how
+        long the row has actually existed. A ~2s NTP step produces exactly
+        a ~2000ms error -- matching the 2050.7ms false STALE_STATE seen
+        with an otherwise perfectly healthy feeder (max write latency
+        0.831ms, scheduling gap 20.269ms).
+
+        Fix: identify each snapshot by (dev, ino, mtime_ns, row content)
+        -- content included so two writes that happen to land in the same
+        mtime_ns tick (coarse filesystem clock resolution) or an inode
+        number that gets reused after a very large number of replace()
+        cycles are never mistaken for the same snapshot -- and record the
+        time.monotonic() timestamp at which THIS identity was first
+        observed. time.monotonic() is specified to never jump due to
+        clock synchronization (only system suspend can affect it, and
+        even then it never goes backward), so the age computed here
+        (`time.monotonic() - first_observed`) reflects real elapsed time
+        regardless of what the wall clock does.
+
+        A genuinely frozen feeder (task 4) is unaffected: its snapshot
+        identity never changes, so `first_observed` stays fixed at the
+        last real write, and the age keeps growing normally until it
+        exceeds the configured timeout, exactly as before.
+        """
+        snapshot_key = (st.st_dev, st.st_ino, st.st_mtime_ns, line)
+        now_monotonic = time.monotonic()
+        if snapshot_key != self._last_snapshot_key:
+            self._last_snapshot_key = snapshot_key
+            self._snapshot_first_observed_monotonic = now_monotonic
+        return now_monotonic - self._snapshot_first_observed_monotonic
+
+    def read_latest(self) -> Tuple[Dict[str, str], str, float, os.stat_result]:
+        try:
+            csv_file = open(self.path, "rb")
+        except FileNotFoundError:
             raise StateFileNotReadyError(f"state file does not exist: {self.path}")
-        self._load_headers()
-        assert self.headers is not None
-        stat = os.stat(self.path)
-        with open(self.path, "rb") as csv_file:
+        try:
+            # HIL-F24-S: os.fstat() on the already-open descriptor, not
+            # os.stat(self.path) -- the latter is a second, separate
+            # pathname lookup that could resolve to a different inode if
+            # the feeder replaced the file between this open() and that
+            # stat() call.
+            st = os.fstat(csv_file.fileno())
+            self._load_headers(csv_file, st)
+            assert self.headers is not None
             csv_file.seek(0, os.SEEK_END)
             end_pos = csv_file.tell()
             block_size = min(65536, end_pos)
             csv_file.seek(end_pos - block_size)
             data = csv_file.read(block_size).decode("utf-8", errors="ignore")
+        finally:
+            csv_file.close()
         lines = [line for line in data.splitlines() if line.strip()]
         if len(lines) < 2:
             raise StateFileMalformedError(f"{self.path} has no complete data rows")
@@ -398,7 +485,12 @@ class LatestCSVReader:
             values = parsed[0]
             if len(values) == len(self.headers):
                 row = dict(zip(self.headers, values))
-                return row, line, stat.st_mtime
+                # HIL-F24-T: the 3rd element is now a monotonic-clock-
+                # based age in seconds (see _snapshot_age_s()), not a raw
+                # wall-clock mtime -- callers must not compare it against
+                # time.time(). `st` (wall-clock mtime included) is still
+                # returned unchanged, for diagnostic display only (task 3).
+                return row, line, self._snapshot_age_s(st, line), st
         raise StateFileMalformedError(f"{self.path} has no complete data rows")
 
 
@@ -2011,6 +2103,36 @@ class SR75DryBoosterEjectionLatch:
         return False
 
 
+def describe_state_freshness_rejection(st: os.stat_result, row: Dict[str, str], row_age_ms: float) -> str:
+    """HIL-F24-S: diagnostic string for a STALE_STATE rejection (task 4).
+    Reports exactly the fields needed to diagnose a reader-side coherence
+    problem at a glance -- which inode/device the metadata came from, its
+    mtime, the row's own source timestamp (whichever candidate field is
+    present), and the computed age -- without needing to reconstruct any
+    of this from raw responder.csv rows after the fact, as this task's
+    own investigation of request 784 had to.
+
+    HIL-F24-T: `row_age_ms` is the monotonic-clock-based age that
+    actually gated this rejection (see LatestCSVReader._snapshot_age_s());
+    `wall_clock_age_ms` below is a separate, purely informational
+    time.time()-vs-st_mtime figure -- wall-clock mtime is retained only
+    as diagnostic metadata (task 3), never compared against the monotonic
+    clock for the acceptance decision itself. A large gap between the two
+    numbers (monotonic age small, wall-clock age large or negative) is
+    itself the signature of a host clock step, exactly like the one that
+    produced the 2050.7ms false rejection this task fixed."""
+    source_ts_field = first_present(row, (
+        "/fdm/jsbsim/simulation/sim-time-sec", "jsb_feed_time_s", "jsb_time_s", "time_s", "Time",
+    ))
+    source_ts = row.get(source_ts_field, "?") if source_ts_field else "?"
+    wall_clock_age_ms = (time.time() - st.st_mtime) * 1000.0
+    return (
+        f"dev={st.st_dev} ino={st.st_ino} mtime_ns={st.st_mtime_ns} "
+        f"row_source_timestamp={source_ts} calculated_age_ms={row_age_ms:.1f} "
+        f"wall_clock_age_ms={wall_clock_age_ms:.1f}"
+    )
+
+
 def wait_for_reply_slot(last_reply_mono: float, min_interval: float) -> bool:
     if min_interval <= 0.0 or last_reply_mono <= 0.0:
         return False
@@ -2033,7 +2155,10 @@ def read_reply_state(
     deadline = time.monotonic() + max(0.0, args.fresh_state_wait_ms) / 1000.0
     while True:
         try:
-            row, signature, mtime = reader.read_latest()
+            # HIL-F24-T: row_age_s is a monotonic-clock-based age (see
+            # LatestCSVReader._snapshot_age_s()), not a wall-clock
+            # duration -- never compare it against time.time().
+            row, signature, row_age_s, st = reader.read_latest()
         except (StateFileNotReadyError, StateFileMalformedError) as exc:
             # HIL-F24-P: a transient state-file read/parse race (e.g. the
             # feeder caught mid-write) must not silently drop this reply.
@@ -2064,9 +2189,25 @@ def read_reply_state(
                 )
             raise
         mapper.clear_state_read_error_dedup()
-        row_age_ms = (time.time() - mtime) * 1000.0
+        # HIL-F24-T: row_age_s comes from LatestCSVReader's monotonic
+        # snapshot-identity tracking -- NOT from time.time() - st_mtime
+        # (both wall-clock/CLOCK_REALTIME), which a host NTP step or
+        # manual clock change can inflate or deflate with no relationship
+        # to how long the row has actually existed (confirmed root cause
+        # of the 2050.7ms false STALE_STATE seen with an otherwise
+        # perfectly healthy ~20ms-cadence feeder).
+        row_age_ms = row_age_s * 1000.0
         if row_age_ms > args.state_timeout_ms:
-            raise StateError(f"STALE_STATE: latest row age {row_age_ms:.1f} ms")
+            # HIL-F24-S: diagnostic printed only on this rejection path
+            # (never on the normal/fresh path, so it adds no per-request
+            # log volume) -- with the TOCTOU fix above, `st` is
+            # structurally guaranteed to be the exact same snapshot `row`
+            # was parsed from, so this is enough to tell a genuinely stale
+            # feeder from a future reader-side coherence bug at a glance.
+            raise StateError(
+                f"STALE_STATE: latest row age {row_age_ms:.1f} ms "
+                f"({describe_state_freshness_rejection(st, row, row_age_ms)})"
+            )
         state = mapper.state_from_csv(row, signature, time.monotonic() - (row_age_ms / 1000.0))
         if mapper.last_source_timestamp is None or state.source_timestamp_s > mapper.last_source_timestamp:
             return state
@@ -2134,8 +2275,15 @@ def _raise_keyboard_interrupt_on_sigterm(signum, frame) -> None:
     raise KeyboardInterrupt()
 
 
+# HIL-F24-S: blocked around each "count a request + write its
+# responder.csv row" pair (see main()'s _log_row_and_count() closure) so
+# a SIGTERM delivered mid-request can never separate the two -- see
+# print_run_summary()'s total_requests param for why this matters.
+_SIGTERM_BLOCK_SET = {signal.SIGTERM}
+
+
 def print_run_summary(
-    request_count: int,
+    total_requests: int,
     replies_sent_count: int,
     stale_state_count: int,
     no_fresh_state_count: int,
@@ -2144,16 +2292,23 @@ def print_run_summary(
 ) -> None:
     """HIL-F24-Q: final run-summary metrics, printed once on any exit path
     (normal, --once, or SIGTERM/KeyboardInterrupt) -- see the `finally:`
-    block at the end of main()."""
+    block at the end of main().
+
+    HIL-F24-S: `total_requests` is the number of requests that actually
+    got a responder.csv row written (see _log_row_and_count() in main()),
+    not the raw count of UDP datagrams received -- those are guaranteed
+    equal in every uninterrupted run, but only the former is guaranteed
+    to equal responder.csv's data-row count when SIGTERM lands mid-run,
+    which is the exact invariant this metric exists to report."""
     print(
         "RUN_SUMMARY "
-        f"total_requests={request_count} "
+        f"total_requests={total_requests} "
         f"replies_sent={replies_sent_count} "
         f"stale_state_count={stale_state_count} "
         f"no_fresh_state_count={no_fresh_state_count} "
         f"malformed_state_count={malformed_state_count} "
         f"state_read_error_count={state_read_error_count} "
-        f"missed_replies={request_count - replies_sent_count}"
+        f"missed_replies={total_requests - replies_sent_count}"
     )
 
 
@@ -2309,6 +2464,10 @@ def main() -> int:
     request_count = 0
     # HIL-F24-Q: run-summary counters, reported by print_run_summary() in
     # the finally: block below on any exit path.
+    # HIL-F24-S: logged_request_count (not request_count) is what
+    # print_run_summary() reports as total_requests -- see
+    # _log_row_and_count() below for why.
+    logged_request_count = 0
     replies_sent_count = 0
     stale_state_count = 0
     no_fresh_state_count = 0
@@ -2335,6 +2494,30 @@ def main() -> int:
         sock.settimeout(timeout_s)
     print(f"Listening on {args.listen_host}:{args.listen_port}")
     print(f"State source: {'mock-state' if args.mock_state else args.state_file}")
+
+    def _log_row_and_count(row: Dict[str, object], sent: bool) -> None:
+        """HIL-F24-S: writes `row` to responder.csv and increments
+        logged_request_count (and replies_sent_count, if `sent`) as one
+        signal-atomic unit -- SIGTERM is blocked for the duration, so an
+        orchestrator-issued SIGTERM landing at any point around this call
+        is deferred until after it returns. This is what guarantees
+        "every counted request produces exactly one responder.csv record"
+        (task 5): request_count (used for in-flight labeling/logging
+        elsewhere in this loop, unchanged) can be incremented mid-request
+        arbitrarily long before the corresponding row is actually written,
+        but logged_request_count/replies_sent_count -- and therefore
+        print_run_summary()'s total_requests/replies_sent, and the actual
+        CSV row -- only ever change together, right here, in one call
+        that cannot be interrupted partway through."""
+        nonlocal logged_request_count, replies_sent_count
+        signal.pthread_sigmask(signal.SIG_BLOCK, _SIGTERM_BLOCK_SET)
+        try:
+            write_log(log_writer, csv_file, row)
+            logged_request_count += 1
+            if sent:
+                replies_sent_count += 1
+        finally:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, _SIGTERM_BLOCK_SET)
 
     try:
         while True:
@@ -2432,9 +2615,7 @@ def main() -> int:
                         )
                     )
                     malformed_command_source = B3CommandSource.PRECONTROL_REFERENCE
-                write_log(
-                    log_writer,
-                    csv_file,
+                _log_row_and_count(
                     make_log_row(
                         request_count=request_count,
                         source=source,
@@ -2450,6 +2631,7 @@ def main() -> int:
                         request_received_host_time=request_received_host_time,
                         dry_booster_attached=dry_booster_latch.attached,
                     ),
+                    sent=False,
                 )
                 if args.once:
                     return 1
@@ -2728,9 +2910,7 @@ def main() -> int:
                     except JSBSimCommandError as command_exc:
                         reason = f"{reason};JSBSIM_NEUTRAL_COMMAND_ERROR: {command_exc}"
                         print(f"B3_TIME_DISCONTINUITY_ABORT neutral_jsbsim_command_sent=0 error={command_exc}")
-                write_log(
-                    log_writer,
-                    csv_file,
+                _log_row_and_count(
                     make_log_row(
                         request_count=request_count,
                         source=source,
@@ -2750,6 +2930,7 @@ def main() -> int:
                         pwm_frame_received_host_time=request_received_host_time,
                         dry_booster_attached=dry_booster_latch.attached,
                     ),
+                    sent=False,
                 )
                 return 4
             except StateEnvelopeError as exc:
@@ -2771,9 +2952,7 @@ def main() -> int:
                     except JSBSimCommandError as command_exc:
                         reason = f"{reason};JSBSIM_NEUTRAL_COMMAND_ERROR: {command_exc}"
                         print(f"B3_STATE_ENVELOPE_ABORT neutral_jsbsim_command_sent=0 error={command_exc}")
-                write_log(
-                    log_writer,
-                    csv_file,
+                _log_row_and_count(
                     make_log_row(
                         request_count=request_count,
                         source=source,
@@ -2795,6 +2974,7 @@ def main() -> int:
                         pwm_frame_received_host_time=request_received_host_time,
                         dry_booster_attached=dry_booster_latch.attached,
                     ),
+                    sent=False,
                 )
                 return 3
             except StateError as exc:
@@ -2820,9 +3000,7 @@ def main() -> int:
                     print(f"STATE_ERROR: {reason}")
                 if actuator_reason:
                     reason = f"{reason};{actuator_reason}"
-                write_log(
-                    log_writer,
-                    csv_file,
+                _log_row_and_count(
                     make_log_row(
                         request_count=request_count,
                         source=source,
@@ -2843,6 +3021,7 @@ def main() -> int:
                         pwm_frame_received_host_time=request_received_host_time,
                         dry_booster_attached=dry_booster_latch.attached,
                     ),
+                    sent=False,
                 )
                 if args.once:
                     return 1
@@ -2863,7 +3042,12 @@ def main() -> int:
                     if args.verbose:
                         print(f"SAVED_FIRST_REPLY {args.save_first_reply} bytes={len(payload)}")
                 reply_bytes = sock.sendto(payload, source)
-                replies_sent_count += 1
+                # HIL-F24-S: replies_sent_count is now incremented inside
+                # _log_row_and_count() below, atomically with the CSV row
+                # write and logged_request_count -- not here -- so a
+                # SIGTERM landing between this send and that write can
+                # never be observed to have counted a sent reply without
+                # also having logged its row.
                 last_reply_mono = time.monotonic()
                 reply_send_host_time = last_reply_mono
                 reason = actuator_reason
@@ -2883,9 +3067,7 @@ def main() -> int:
                         f"rpy=({state.roll_rad:.5f},{state.pitch_rad:.5f},{state.yaw_rad:.5f}){missing}{reused}"
                     )
 
-            write_log(
-                log_writer,
-                csv_file,
+            _log_row_and_count(
                 make_log_row(
                     request_count=request_count,
                     source=source,
@@ -2909,6 +3091,7 @@ def main() -> int:
                     reply_send_host_time=reply_send_host_time if not args.dry_run else None,
                     dry_booster_attached=dry_booster_latch.attached,
                 ),
+                sent=not args.dry_run,
             )
             if args.once:
                 return 0
@@ -2917,7 +3100,7 @@ def main() -> int:
         return 0
     finally:
         print_run_summary(
-            request_count=request_count,
+            total_requests=logged_request_count,
             replies_sent_count=replies_sent_count,
             stale_state_count=stale_state_count,
             no_fresh_state_count=no_fresh_state_count,

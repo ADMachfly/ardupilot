@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="utf-8"?>
+<runscript xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="http://jsbsim.sf.net/JSBSimScript.xsd"
+    name="SR75 HIL-F24-R1 dynamic state feed (ground-static, engines off)">
+
+  <description>
+    HIL-F24-R1: continuous live SR-75 6-DOF JSBSim state for feeding the
+    real Pixhawk over PPP/SIM_JSON in MANUAL/disarmed mode.
+
+    Ground-level, motionless start (accel_ground_init, the same IC used
+    by the validated SR75_accel_ground_test.xml accelerometer-semantics
+    test). All engines are explicitly held off and RATO/turbojet/flight
+    control commands are pinned at zero for the entire run: this
+    simulation never produces engine, RATO, or actuator output; it only
+    ever supplies read-only 6-DOF state to sr75_hil_f24r1_dynamic_jsbsim_feed.py,
+    which republishes it as an atomic state.csv snapshot for
+    sr75_sim_json_responder.py (LOG_ONLY actuator mode, no
+    jsbsim-command-target option) to answer the Pixhawk's SIM_JSON requests
+    with. No JSBSim property is ever written to based on anything the
+    Pixhawk sends: there is no feedback path into this simulation at
+    all in HIL-F24-R1.
+
+    Every output field below is named to match
+    sr75_hil_f24d_static_state_feed.py's CSV_FIELDS exactly (and thus
+    StateMapper.state_from_csv()'s recognized column names in
+    sr75_sim_json_responder.py), in SI units, so the Python feeder needs
+    no unit conversion of its own: only a straight column-matched
+    passthrough into atomic_write_csv_snapshot().
+
+    A long run end (3600s) is used deliberately; the actual test duration
+    is controlled externally by the Python feeder terminating this JSBSim
+    subprocess, the same way sr75_hil_f24d_static_state_feed.py's own
+    duration-s option controls the static feeder's run length.
+  </description>
+
+  <use aircraft="sr_75_6_dof" initialize="accel_ground_init"/>
+
+  <run start="0.0" end="3600.0" dt="0.008333">
+    <event name="Engines off, RATO/throttle/controls pinned at zero for the whole run">
+      <condition>simulation/sim-time-sec ge 0.0</condition>
+      <set name="propulsion/engine[0]/set-running" value="0"/>
+      <set name="propulsion/engine[1]/set-running" value="0"/>
+      <set name="propulsion/engine[2]/set-running" value="0"/>
+      <set name="fcs/turbojet-throttle-cmd-norm" value="0.0"/>
+      <set name="fcs/rato-throttle-cmd-norm" value="0.0"/>
+      <set name="fcs/throttle-cmd-norm" value="0.0"/>
+      <set name="fcs/aileron-cmd-norm" value="0.0"/>
+      <set name="fcs/elevator-cmd-norm" value="0.0"/>
+      <set name="fcs/rudder-cmd-norm" value="0.0"/>
+      <set name="simulation/do_simple_trim" value="2"/>
+      <notify/>
+    </event>
+  </run>
+
+  <output name="../../../../../tmp/sr75_hil_f24r1_jsbsim_raw.csv" type="CSV" rate="50">
+    <function name="time_s">
+      <property>simulation/sim-time-sec</property>
+    </function>
+    <function name="lat_deg">
+      <property>position/lat-gc-deg</property>
+    </function>
+    <function name="lon_deg">
+      <property>position/long-gc-deg</property>
+    </function>
+    <function name="alt_m">
+      <product>
+        <property>position/h-sl-ft</property>
+        <value>0.3048</value>
+      </product>
+    </function>
+    <function name="roll_rad">
+      <property>attitude/phi-rad</property>
+    </function>
+    <function name="pitch_rad">
+      <property>attitude/theta-rad</property>
+    </function>
+    <function name="yaw_rad">
+      <property>attitude/psi-rad</property>
+    </function>
+    <function name="vn_mps">
+      <product>
+        <property>velocities/v-north-fps</property>
+        <value>0.3048</value>
+      </product>
+    </function>
+    <function name="ve_mps">
+      <product>
+        <property>velocities/v-east-fps</property>
+        <value>0.3048</value>
+      </product>
+    </function>
+    <function name="vd_mps">
+      <product>
+        <property>velocities/v-down-fps</property>
+        <value>0.3048</value>
+      </product>
+    </function>
+    <function name="airspeed_mps">
+      <product>
+        <property>velocities/vt-fps</property>
+        <value>0.3048</value>
+      </product>
+    </function>
+    <function name="p_rad_s">
+      <property>velocities/p-rad_sec</property>
+    </function>
+    <function name="q_rad_s">
+      <property>velocities/q-rad_sec</property>
+    </function>
+    <function name="r_rad_s">
+      <property>velocities/r-rad_sec</property>
+    </function>
+    <function name="accel_body_x_mss">
+      <product>
+        <property>accelerations/a-pilot-x-ft_sec2</property>
+        <value>0.3048</value>
+      </product>
+    </function>
+    <function name="accel_body_y_mss">
+      <product>
+        <property>accelerations/a-pilot-y-ft_sec2</property>
+        <value>0.3048</value>
+      </product>
+    </function>
+    <function name="accel_body_z_mss">
+      <product>
+        <property>accelerations/a-pilot-z-ft_sec2</property>
+        <value>0.3048</value>
+      </product>
+    </function>
+  </output>
+
+</runscript>

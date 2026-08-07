@@ -125,7 +125,7 @@ class TestFeederLeavesValidFinalSnapshot(unittest.TestCase):
         self.assertEqual(lines[0].split(","), feed.CSV_FIELDS)
         self.assertEqual(len(lines), 2)  # header + exactly one data row
         reader = responder.LatestCSVReader(path)
-        row, _, _ = reader.read_latest()
+        row, _, _, _ = reader.read_latest()
         self.assertAlmostEqual(float(row["time_s"]), 19 * 0.02, places=6)
 
 

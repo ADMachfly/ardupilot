@@ -156,24 +156,57 @@ def test_stale_timeout():
     """Exercises the REAL read_reply_state()/state_timeout_ms code path in
     sr75_sim_json_responder.py against a genuinely stale temp CSV file --
     not a reimplementation of the staleness check.
+
+    HIL-F24-T: staleness is now determined by a monotonic-clock-based
+    "how long has this exact snapshot identity gone unchanged" tracker
+    (LatestCSVReader._snapshot_age_s()), not by comparing wall-clock
+    time.time() against the file's st_mtime -- a host NTP/clock step can
+    no longer manufacture (or hide) a false staleness result. This means
+    back-dating the file's mtime via os.utime() (the old way this test
+    simulated staleness) no longer has any effect on the outcome: the
+    reader's first-ever observation of a given snapshot always starts its
+    age at ~0, regardless of what wall-clock timestamp the filesystem
+    reports. Genuine staleness is now simulated the same way a real
+    frozen feeder produces it: an initial read establishes the snapshot's
+    monotonic "first observed" time, then real wall-clock time is allowed
+    to actually pass (via time.sleep()) with no further writes, so the
+    monotonic age genuinely exceeds state_timeout_ms.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         state_path = Path(tmpdir) / "state.csv"
+        fieldnames = [
+            "time_s", "lat_deg", "lon_deg", "alt_m", "vn_mps", "ve_mps", "vd_mps",
+            "roll_rad", "pitch_rad", "yaw_rad",
+            "p_rad_s", "q_rad_s", "r_rad_s",
+            "accel_body_x_mss", "accel_body_y_mss", "accel_body_z_mss",
+        ]
         with open(state_path, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["time_s", "lat_deg", "lon_deg", "alt_m", "vn_mps", "ve_mps", "vd_mps"])
-            w.writerow(["0.0", str(profiles.BASE_LAT), str(profiles.BASE_LON), str(profiles.BASE_ALT_M), "0.0", "0.0", "0.0"])
-        # back-date the file's mtime so it is already stale
-        old_time = time.time() - 5.0
-        import os
-        os.utime(state_path, (old_time, old_time))
+            w.writerow(fieldnames)
+            w.writerow([
+                "0.0", str(profiles.BASE_LAT), str(profiles.BASE_LON), str(profiles.BASE_ALT_M), "0.0", "0.0", "0.0",
+                "0.0", "0.0", "0.0",
+                "0.0", "0.0", "0.0",
+                "0.0", "0.0", "0.0",
+            ])
 
         reader = responder.LatestCSVReader(str(state_path))
         mapper = responder.StateMapper(strict=True)
         mock_source = responder.MockStateSource()
         args = argparse.Namespace(
-            mock_state=False, fresh_state_wait_ms=0.0, state_timeout_ms=500.0, allow_state_reuse=False,
+            mock_state=False, fresh_state_wait_ms=0.0, state_timeout_ms=150.0, allow_state_reuse=False,
         )
+        # Establish the snapshot's monotonic "first observed" timestamp.
+        # (mapper.accept_state() is deliberately not called here, so
+        # mapper.last_source_timestamp stays None and the second call
+        # below is gated purely by the staleness check, not by the
+        # separate "no fresher row since last accepted" NO_FRESH_STATE
+        # check further down in read_reply_state().)
+        responder.read_reply_state(args, reader, mapper, mock_source)
+        # Let real time pass, well beyond state_timeout_ms, with no
+        # further writes -- this is what a genuinely frozen feeder looks
+        # like under the new monotonic gate.
+        time.sleep(0.3)
         try:
             responder.read_reply_state(args, reader, mapper, mock_source)
         except responder.StateError as exc:

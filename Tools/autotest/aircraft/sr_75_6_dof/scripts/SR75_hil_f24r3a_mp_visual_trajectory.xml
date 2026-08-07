@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<runscript xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="http://jsbsim.sf.net/JSBSimScript.xsd"
+    name="SR75 HIL-F24-R3A Mission Planner dynamic visualization trajectory">
+
+  <description>
+    HIL-F24-R3A: deterministic read-only visualization trajectory for
+    Mission Planner over PPP/SIM_JSON. JSBSim is used as the time source
+    and CSV publisher, but the output state is a scripted bounded
+    trajectory: no Pixhawk command is fed back to JSBSim, and engine,
+    throttle, RATO, ejection and flight-control command properties are
+    pinned at zero for the entire run.
+
+    Expected moving display envelope after the R3G EKF-ready handoff:
+      north/east displacement: about 180 m / 120 m
+      altitude change: +30 m
+      roll: 0..+4 deg
+      pitch: 0..+3 deg
+      yaw change: +15 deg
+  </description>
+
+  <use aircraft="sr_75_6_dof" initialize="hil_f24r3a_visual_time_source_init"/>
+
+  <run start="0.0" end="3600.0" dt="0.02">
+    <event name="Safety pins: engines/RATO/throttle/controls remain zero">
+      <condition>simulation/sim-time-sec ge 0.0</condition>
+      <set name="propulsion/engine[0]/set-running" value="0"/>
+      <set name="propulsion/engine[1]/set-running" value="0"/>
+      <set name="propulsion/engine[2]/set-running" value="0"/>
+      <set name="fcs/turbojet-throttle-cmd-norm" value="0.0"/>
+      <set name="fcs/rato-throttle-cmd-norm" value="0.0"/>
+      <set name="fcs/throttle-cmd-norm" value="0.0"/>
+      <set name="fcs/aileron-cmd-norm" value="0.0"/>
+      <set name="fcs/elevator-cmd-norm" value="0.0"/>
+      <set name="fcs/rudder-cmd-norm" value="0.0"/>
+      <notify/>
+    </event>
+  </run>
+  <output name="../../../../../tmp/sr75_hil_f24r3a_mp_visual_raw.csv" type="CSV" rate="50">
+    <!-- u = clamp(t / 60, 0, 1); s = 3u^2 - 2u^3. R3G keeps the
+         Pixhawk on a separate stationary truth feeder until EKF readiness;
+         this moving feeder starts only after that gate succeeds. -->
+    <function name="time_s">
+      <property>simulation/sim-time-sec</property>
+    </function>
+    <function name="lat_deg">
+      <sum><value>32.5378085</value><product><value>0.00161694</value><product><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>3.0</value><product><value>2.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></product></difference></product></product></sum>
+    </function>
+    <function name="lon_deg">
+      <sum><value>74.3661944</value><product><value>0.00126792</value><product><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>3.0</value><product><value>2.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></product></difference></product></product></sum>
+    </function>
+    <function name="alt_m">
+      <sum><value>240.201118</value><product><value>30.0</value><product><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>3.0</value><product><value>2.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></product></difference></product></product></sum>
+    </function>
+    <function name="roll_rad">
+      <product><value>0.069813170</value><product><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>3.0</value><product><value>2.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></product></difference></product></product>
+    </function>
+    <function name="pitch_rad">
+      <product><value>0.052359878</value><product><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>3.0</value><product><value>2.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></product></difference></product></product>
+    </function>
+    <function name="yaw_rad">
+      <sum><value>5.497787144</value><product><value>0.261799388</value><product><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>3.0</value><product><value>2.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></product></difference></product></product></sum>
+    </function>
+    <function name="vn_mps">
+      <product><value>179.9977608</value><product><value>0.1</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>1.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></difference></product></product>
+    </function>
+    <function name="ve_mps">
+      <product><value>118.9902933</value><product><value>0.1</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>1.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></difference></product></product>
+    </function>
+    <function name="vd_mps">
+      <product><value>-30.0</value><product><value>0.1</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>1.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></difference></product></product>
+    </function>
+    <function name="airspeed_mps">
+      <product><value>217.8483046</value><product><value>0.1</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>1.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></difference></product></product>
+    </function>
+    <function name="p_rad_s">
+      <difference><product><value>0.006981317</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>1.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></difference></product><product><product><value>0.026179939</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>1.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></difference></product><sin><product><value>0.052359878</value><product><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>3.0</value><product><value>2.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></product></difference></product></product></sin></product></difference>
+    </function>
+    <function name="q_rad_s">
+      <sum><product><product><value>0.005235988</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>1.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></difference></product><cos><product><value>0.069813170</value><product><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>3.0</value><product><value>2.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></product></difference></product></product></cos></product><product><product><value>0.026179939</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>1.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></difference></product><sin><product><value>0.069813170</value><product><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>3.0</value><product><value>2.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></product></difference></product></product></sin><cos><product><value>0.052359878</value><product><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>3.0</value><product><value>2.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></product></difference></product></product></cos></product></sum>
+    </function>
+    <function name="r_rad_s">
+      <sum><product><value>-1.0</value><product><value>0.005235988</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>1.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></difference></product><sin><product><value>0.069813170</value><product><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>3.0</value><product><value>2.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></product></difference></product></product></sin></product><product><product><value>0.026179939</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>1.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></difference></product><cos><product><value>0.069813170</value><product><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>3.0</value><product><value>2.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></product></difference></product></product></cos><cos><product><value>0.052359878</value><product><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>3.0</value><product><value>2.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></product></difference></product></product></cos></product></sum>
+    </function>
+    <function name="accel_body_x_mss">
+      <product><value>9.80665</value><sin><product><value>0.052359878</value><product><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>3.0</value><product><value>2.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></product></difference></product></product></sin></product>
+    </function>
+    <function name="accel_body_y_mss">
+      <product><value>-9.80665</value><sin><product><value>0.069813170</value><product><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>3.0</value><product><value>2.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></product></difference></product></product></sin><cos><product><value>0.052359878</value><product><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>3.0</value><product><value>2.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></product></difference></product></product></cos></product>
+    </function>
+    <function name="accel_body_z_mss">
+      <product><value>-9.80665</value><cos><product><value>0.069813170</value><product><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>3.0</value><product><value>2.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></product></difference></product></product></cos><cos><product><value>0.052359878</value><product><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min><difference><value>3.0</value><product><value>2.0</value><min><value>1.0</value><max><value>0.0</value><product><property>simulation/sim-time-sec</property><value>0.0166666666667</value></product></max></min></product></difference></product></product></cos></product>
+    </function>
+  </output>>
+
+</runscript>

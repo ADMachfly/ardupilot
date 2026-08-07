@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+
+# AP_NavEKF3_core.h requires APM_BUILD_DIRECTORY to be defined (it is
+# normally supplied per-vehicle by ap_program's legacy-defines path) --
+# build these tests with APM_BUILD_AP_DAL_Standalone, the same "no real
+# vehicle" build type used by the AP_DAL/Replay standalone tooling this
+# EKF3 code already supports.
+
+
+def build(bld):
+    if not bld.env.HAS_GTEST:
+        return
+
+    features = []
+    if bld.cmd == 'check':
+        features.append('test')
+
+    for f in bld.path.ant_glob(incl='*.cpp'):
+        bld.ap_program(
+            features=features,
+            includes=[bld.srcnode.abspath() + '/tests/'],
+            source=[f],
+            use=['ap', 'GTEST'],
+            program_name=f.change_ext('').name,
+            program_groups='tests',
+            use_legacy_defines=False,
+            vehicle_binary=False,
+            cxxflags=['-Wno-undef'],
+            defines=['APM_BUILD_DIRECTORY=APM_BUILD_AP_DAL_Standalone'],
+        )

@@ -143,6 +143,8 @@ class FakeMavlinkOriginPixhawk:
                     ))
                 elif (mtype == "COMMAND_LONG" and msg.command == mavutil.mavlink.MAV_CMD_REQUEST_MESSAGE
                       and int(msg.param1) == mavutil.mavlink.MAVLINK_MSG_ID_GPS_GLOBAL_ORIGIN):
+                    if self.origin_deg is None:
+                        continue
                     lat, lon, alt = self.origin_deg
                     self._send(mavlink2.MAVLink_gps_global_origin_message(
                         latitude=int(lat * 1e7), longitude=int(lon * 1e7), altitude=int(alt * 1e3),
@@ -200,6 +202,12 @@ class TestOriginDiagnosticEndToEnd(unittest.TestCase):
         self.assertIn("WARN: HOME/origin vs. truth horizontal mismatch", result.stdout)
         # Matches the real captured magnitude (~11,231 km) within 1%.
         self.assertIn("GPS_GLOBAL_ORIGIN vs. truth: horizontal=112", result.stdout)
+
+    def test_missing_origin_fails_even_when_home_matches_truth(self):
+        result = self._run(home_deg=REAL_TRUTH_DEG, origin_deg=None)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("GPS_GLOBAL_ORIGIN: NOT RECEIVED", result.stdout)
+        self.assertIn("HOME_POSITION alone is not an EKF-origin relatch", result.stdout)
 
     def test_ahrs_health_statustext_flagged(self):
         result = self._run(home_deg=REAL_TRUTH_DEG, origin_deg=REAL_TRUTH_DEG, statustext="AHRS: DCM active")
@@ -266,6 +274,17 @@ class TestSummaryJsonOutput(unittest.TestCase):
             self.assertFalse(summary["ok"])
             self.assertGreater(summary["gps_global_origin_mismatch_m"], 11_000_000.0)
             self.assertLess(summary["home_mismatch_m"], 50.0)
+
+    def test_summary_missing_origin_is_not_ok_even_when_home_matches(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result, summary_path = self._run_with_summary(REAL_TRUTH_DEG, None, Path(tmpdir))
+            self.assertEqual(result.returncode, 1, result.stdout)
+            summary = json.loads(summary_path.read_text())
+            self.assertFalse(summary["ok"])
+            self.assertIsNone(summary["gps_global_origin_mismatch_m"])
+            self.assertAlmostEqual(summary["home_mismatch_m"], 0.0, delta=1.0)
 
     def test_no_summary_json_written_when_flag_omitted(self):
         """Backward compatibility: omitting --summary-json must not write

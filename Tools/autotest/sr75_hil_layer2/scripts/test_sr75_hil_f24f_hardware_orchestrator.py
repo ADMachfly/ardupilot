@@ -5,6 +5,9 @@ tests -- they exercise should_proceed_to_hardware(), check_adapter_
 presence(), build_session_dir(), and build_execution_plan() only.
 """
 import argparse
+import json
+import math
+import re
 import shutil
 import subprocess
 import sys
@@ -12,9 +15,11 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sr75_hil_f24f_hardware_orchestrator as orch  # noqa: E402
+import sr75_hil_f24d_static_state_feed as state_feed  # noqa: E402
 
 
 def make_args(**overrides):
@@ -39,6 +44,10 @@ def make_args(**overrides):
         relatch_ppp_retry_delay_s=orch.DEFAULT_RELATCH_PPP_RETRY_DELAY_S,
         relatch_ppp_health_timeout_s=orch.DEFAULT_RELATCH_PPP_HEALTH_TIMEOUT_S,
         relatch_ppp_health_poll_s=orch.DEFAULT_RELATCH_PPP_HEALTH_POLL_S,
+        confirm_mp_visualization=False, visualization_duration_s=orch.DEFAULT_VISUALIZATION_DURATION_S,
+        r3a_ekf_readiness_timeout_s=orch.R3A_EKF_READY_TIMEOUT_S,
+        r3a_ekf_readiness_consecutive=orch.R3A_EKF_READY_CONSECUTIVE_REPORTS,
+        enable_mp_forward=False, mp_udp_host="127.0.0.1", mp_udp_port=14550,
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -413,12 +422,12 @@ class TestBuildSessionDirR2Stage(unittest.TestCase):
 
 
 class TestSessionArtifactPaths(unittest.TestCase):
-    def test_all_eight_placeholders_present(self):
+    def test_all_placeholders_present(self):
         paths = orch.session_artifact_paths(Path("/tmp/sessions/example"))
         expected_keys = {
             "state_csv", "responder_csv", "jsbsim_truth_csv", "pixhawk_estimator_csv",
             "estimator_comparison_csv", "estimator_summary_json", "estimator_summary_md",
-            "origin_relatch_summary_json",
+            "origin_relatch_summary_json", "mp_checklist_md",
         }
         self.assertEqual(set(paths.keys()), expected_keys)
         for key, value in paths.items():
@@ -434,6 +443,285 @@ class TestSessionArtifactPaths(unittest.TestCase):
         output = buf.getvalue()
         self.assertIn("jsbsim_truth.csv", output)
         self.assertIn("estimator_summary.md", output)
+
+
+class TestSudoAndRunStepSafety(unittest.TestCase):
+    def test_expired_sudo_credential_aborts_before_ppp(self):
+        def fake_run(cmd, stdout=None, stderr=None, timeout=None):
+            self.assertEqual(cmd, ["sudo", "-n", "true"])
+            return subprocess.CompletedProcess(cmd, returncode=1)
+
+        ok, reason = orch.check_sudo_noninteractive(run_fn=fake_run)
+        self.assertFalse(ok)
+        self.assertEqual(reason, orch.SUDO_CREDENTIAL_ABORT)
+
+    def test_sudo_timeout_uses_same_operator_instruction(self):
+        def fake_run(cmd, stdout=None, stderr=None, timeout=None):
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+
+        ok, reason = orch.check_sudo_noninteractive(run_fn=fake_run)
+        self.assertFalse(ok)
+        self.assertIn(orch.SUDO_CREDENTIAL_ABORT, reason)
+
+    def test_orchestrator_managed_ppp_sudo_commands_are_noninteractive(self):
+        args = make_args(profile="visual", stage="r3a")
+        plan = orch.build_execution_plan(args)
+        for name in ("ppp_start", "ppp_stop"):
+            step = next(s for s in plan if s.name == name)
+            with self.subTest(name=name):
+                self.assertEqual(step.command[:2], ["sudo", "-n"])
+        for step in orch.ppp_cleanup_steps(args.ppp_device):
+            with self.subTest(name=step.name):
+                self.assertEqual(step.command[:2], ["sudo", "-n"])
+
+    def test_run_step_timeout_becomes_controlled_abort(self):
+        original_run = orch.subprocess.run
+
+        def fake_run(cmd, stdout=None, stderr=None, timeout=None):
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+
+        tmpdir = Path(tempfile.mkdtemp(prefix="hil_f24r3f_timeout_"))
+        step = orch.Step("slow", "Slow command", ["slow-command", "--arg"])
+        try:
+            orch.subprocess.run = fake_run
+            with self.assertRaises(orch.OrchestratorAbort) as ctx:
+                orch.run_step(step, tmpdir, tmpdir / "slow.log", timeout_s=7.0)
+        finally:
+            orch.subprocess.run = original_run
+        msg = str(ctx.exception)
+        self.assertIn("Command timed out after 7.0s", msg)
+        self.assertIn("slow-command --arg", msg)
+        self.assertIn(str(tmpdir / "slow.log"), msg)
+
+
+class TestR3aEkfReadinessGate(unittest.TestCase):
+    class Msg:
+        def __init__(self, flags):
+            self.flags = flags
+
+    HEALTHY = orch.EKF_ATTITUDE | orch.EKF_POS_HORIZ_REL
+
+    def _recv_from_flags(self, flags, clock):
+        flags = list(flags)
+
+        def recv(timeout_s):
+            clock["t"] += 0.5
+            if not flags:
+                return None
+            return self.Msg(flags.pop(0))
+
+        return recv
+
+    def test_consecutive_healthy_reports_are_required(self):
+        clock = {"t": 0.0}
+        recv = self._recv_from_flags([
+            self.HEALTHY,
+            orch.EKF_UNINITIALIZED,
+            self.HEALTHY,
+            self.HEALTHY,
+            self.HEALTHY,
+        ], clock)
+        ok, reason = orch.wait_for_consecutive_ekf_ready(
+            recv, timeout_s=10.0, consecutive_required=3, now_fn=lambda: clock["t"],
+        )
+        self.assertTrue(ok)
+        self.assertIn("3 consecutive", reason)
+
+    def test_uninitialized_timeout_blocks_motion(self):
+        clock = {"t": 0.0}
+        recv = self._recv_from_flags([orch.EKF_UNINITIALIZED] * 20, clock)
+        ok, reason = orch.wait_for_consecutive_ekf_ready(
+            recv, timeout_s=3.0, consecutive_required=3, now_fn=lambda: clock["t"],
+        )
+        self.assertFalse(ok)
+        self.assertIn("timed out", reason)
+        self.assertIn("EKF_UNINITIALIZED", reason)
+
+    def test_position_flag_is_required(self):
+        ok, reason = orch.ekf_flags_ready(orch.EKF_ATTITUDE)
+        self.assertFalse(ok)
+        self.assertIn("position flag missing", reason)
+
+    class PremotionMsg:
+        def __init__(self, msg_type, **kwargs):
+            self._msg_type = msg_type
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+        def get_type(self):
+            return self._msg_type
+
+    def _premotion_summary(self):
+        return {
+            "gps": {},
+            "ekf": {
+                "message_count": 0,
+                "first_uninitialized_cleared_time": None,
+                "first_attitude_flag_time": None,
+                "first_horizontal_position_flag_time": None,
+                "last_flags": None,
+                "last_velocity_variance": None,
+                "last_pos_horiz_variance": None,
+                "last_pos_vert_variance": None,
+                "last_compass_variance": None,
+            },
+        }
+
+    def test_premotion_summary_records_r2c_like_gps_and_ekf_pass(self):
+        summary = self._premotion_summary()
+        orch.update_r3a_premotion_summary(
+            summary,
+            self.PremotionMsg(
+                "GPS_RAW_INT", fix_type=3, satellites_visible=15,
+                eph=100, epv=100, vel=0, lat=int(32.5378085e7), lon=int(74.3661944e7), alt=240200,
+            ),
+            1.0,
+        )
+        orch.update_r3a_premotion_summary(
+            summary,
+            self.PremotionMsg("EKF_STATUS_REPORT", flags=self.HEALTHY, velocity_variance=0.01),
+            2.0,
+        )
+        self.assertEqual(summary["gps"]["GPS_RAW_INT"]["first_fix_type_ge_3_time"], 1.0)
+        self.assertEqual(summary["gps"]["GPS_RAW_INT"]["first_satellite_count"], 15)
+        self.assertEqual(summary["gps"]["GPS_RAW_INT"]["message_count"], 1)
+        self.assertEqual(summary["ekf"]["message_count"], 1)
+        self.assertEqual(summary["ekf"]["first_uninitialized_cleared_time"], 2.0)
+        self.assertEqual(summary["ekf"]["first_attitude_flag_time"], 2.0)
+        self.assertEqual(summary["ekf"]["first_horizontal_position_flag_time"], 2.0)
+
+    def test_premotion_timeout_reason_reports_bad_fix(self):
+        summary = self._premotion_summary()
+        orch.update_r3a_premotion_summary(
+            summary,
+            self.PremotionMsg("GPS_RAW_INT", fix_type=1, satellites_visible=15, eph=65535, epv=65535, vel=0),
+            1.0,
+        )
+        reason = orch.r3a_premotion_timeout_reason(
+            summary, "EKF_UNINITIALIZED set flags=1024", timeout_s=15.0, consecutive=0, required=3,
+        )
+        self.assertIn("EKF_UNINITIALIZED", reason)
+        self.assertIn("GPS_RAW_INT never reached fix_type>=3", reason)
+        self.assertIn("GPS2_RAW not received", reason)
+
+    def test_premotion_message_row_includes_gps_and_ekf_fields(self):
+        gps_row = orch.r3a_premotion_message_to_row(
+            self.PremotionMsg("GPS2_RAW", fix_type=3, satellites_visible=15, eph=100, epv=100, vel=25),
+            7.25,
+        )
+        ekf_row = orch.r3a_premotion_message_to_row(
+            self.PremotionMsg("EKF_STATUS_REPORT", flags=self.HEALTHY, pos_horiz_variance=0.02),
+            8.5,
+        )
+        self.assertEqual(gps_row["msg_type"], "GPS2_RAW")
+        self.assertEqual(gps_row["fix_type"], 3)
+        self.assertEqual(gps_row["satellites_visible"], 15)
+        self.assertEqual(ekf_row["ekf_flags"], self.HEALTHY)
+        self.assertEqual(ekf_row["ekf_pos_horiz_variance"], 0.02)
+
+    def test_premotion_message_row_includes_attitude_ahrs_and_imu_fields(self):
+        att_row = orch.r3a_premotion_message_to_row(
+            self.PremotionMsg("ATTITUDE", roll=0.1, pitch=-0.2, yaw=0.3, rollspeed=0.01, pitchspeed=-0.02, yawspeed=0.03),
+            9.0,
+        )
+        ahrs2_row = orch.r3a_premotion_message_to_row(
+            self.PremotionMsg("AHRS2", roll=0.2, pitch=-0.1, yaw=0.4, altitude=12.5, lat=325378085, lng=743661944),
+            10.0,
+        )
+        imu_row = orch.r3a_premotion_message_to_row(
+            self.PremotionMsg("SCALED_IMU2", xacc=1, yacc=2, zacc=-1000, xgyro=3, ygyro=4, zgyro=5),
+            11.0,
+        )
+        self.assertAlmostEqual(att_row["att_roll_deg"], math.degrees(0.1))
+        self.assertAlmostEqual(att_row["att_pitch_deg"], math.degrees(-0.2))
+        self.assertAlmostEqual(att_row["att_q_deg_s"], math.degrees(-0.02))
+        self.assertAlmostEqual(ahrs2_row["ahrs2_roll_deg"], math.degrees(0.2))
+        self.assertEqual(ahrs2_row["ahrs2_alt_m"], 12.5)
+        self.assertEqual(ahrs2_row["ahrs2_lat_deg"], 32.5378085)
+        self.assertEqual(ahrs2_row["ahrs2_lon_deg"], 74.3661944)
+        self.assertEqual(imu_row["imu_xacc"], 1)
+        self.assertEqual(imu_row["imu_zgyro"], 5)
+
+    def test_premotion_summary_tracks_diagnostic_message_counts(self):
+        summary = orch.r3a_empty_premotion_summary(3)
+        orch.update_r3a_premotion_summary(
+            summary,
+            self.PremotionMsg("ATTITUDE", roll=0.1, pitch=-0.2, yaw=0.3),
+            1.0,
+        )
+        orch.update_r3a_premotion_summary(
+            summary,
+            self.PremotionMsg("AHRS2", roll=0.2, pitch=-0.1, yaw=0.4),
+            2.0,
+        )
+        orch.update_r3a_premotion_summary(
+            summary,
+            self.PremotionMsg("RAW_IMU", xacc=1, yacc=2, zacc=-1000, xgyro=3, ygyro=4, zgyro=5),
+            3.0,
+        )
+        self.assertEqual(summary["message_counts"]["ATTITUDE"], 1)
+        self.assertEqual(summary["message_counts"]["AHRS2"], 1)
+        self.assertEqual(summary["message_counts"]["RAW_IMU"], 1)
+        self.assertAlmostEqual(summary["last_attitude"]["pitch_deg"], math.degrees(-0.2))
+        self.assertAlmostEqual(summary["last_ahrs"]["AHRS2"]["yaw_deg"], math.degrees(0.4))
+        self.assertEqual(summary["last_imu"]["RAW_IMU"]["zacc"], -1000)
+
+    class FakeMav:
+        def __init__(self):
+            self.commands = []
+
+        def command_long_send(self, *args):
+            self.commands.append(args)
+
+    class FakeMaster:
+        target_system = 1
+        target_component = 1
+
+        def __init__(self, messages):
+            self.messages = list(messages)
+            self.mav = TestR3aEkfReadinessGate.FakeMav()
+            self.closed = False
+
+        def wait_heartbeat(self, timeout):
+            return object()
+
+        def recv_match(self, type=None, blocking=False, timeout=None):
+            if not self.messages:
+                return None
+            return self.messages.pop(0)
+
+        def close(self):
+            self.closed = True
+
+    def test_missing_origin_path_preserves_premotion_diagnostic_artifacts(self):
+        tmpdir = Path(tempfile.mkdtemp(prefix="hil_f24r3g_missing_origin_"))
+        fake_master = self.FakeMaster([
+            self.PremotionMsg("GPS_RAW_INT", fix_type=1, satellites_visible=15, eph=65535, epv=65535, vel=0),
+            self.PremotionMsg("EKF_STATUS_REPORT", flags=orch.EKF_UNINITIALIZED, velocity_variance=0.1),
+        ])
+        capture = orch.R3aPremotionDiagnosticCapture(
+            "/dev/fake", 115200, tmpdir / "r3a_premotion_gps_ekf.csv",
+            tmpdir / "r3a_premotion_gps_ekf_summary.json",
+            mavlink_connection_factory=lambda *args, **kwargs: fake_master,
+        )
+        capture.start()
+        capture.drain(duration_s=0.0)
+        ok, reason = orch.evaluate_origin_relatch_summary(
+            {"gps_global_origin_mismatch_m": None}, max_mismatch_m=50.0,
+        )
+        self.assertFalse(ok)
+        self.assertIn("not received", reason)
+        capture.close()
+        self.assertTrue(fake_master.closed)
+        csv_text = (tmpdir / "r3a_premotion_gps_ekf.csv").read_text()
+        summary = json.loads((tmpdir / "r3a_premotion_gps_ekf_summary.json").read_text())
+        self.assertIn("GPS_RAW_INT", csv_text)
+        self.assertEqual(summary["gps"]["GPS_RAW_INT"]["message_count"], 1)
+        self.assertEqual(summary["ekf"]["message_count"], 1)
+        self.assertEqual(summary["gps"]["GPS_RAW_INT"]["last_fix_type"], 1)
+        self.assertNotEqual(summary["reason"], "no EKF_STATUS_REPORT received")
+        self.assertIn("EKF_STATUS_REPORT received", summary["reason"])
+        self.assertIn("EKF_UNINITIALIZED set flags=1024", summary["reason"])
 
 
 class TestMainR2StageValidation(unittest.TestCase):
@@ -644,6 +932,26 @@ class TestShouldProceedToHardwareR2cStage(unittest.TestCase):
         self.assertEqual(reason, "")
 
 
+class TestShouldProceedToHardwareR3aStage(unittest.TestCase):
+    def test_r3a_stage_requires_confirm_mp_visualization(self):
+        ok, reason = orch.should_proceed_to_hardware(
+            execute=True, confirm_static_only=False, confirm_dynamic_jsbsim=False,
+            profile="visual", confirm_estimator_comparison=False, stage="r3a",
+            confirm_origin_relatch=False, confirm_mp_visualization=True,
+        )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_r3a_stage_with_other_confirm_stays_dry_run(self):
+        ok, reason = orch.should_proceed_to_hardware(
+            execute=True, confirm_static_only=False, confirm_dynamic_jsbsim=False,
+            profile="visual", confirm_estimator_comparison=True, stage="r3a",
+            confirm_origin_relatch=True, confirm_mp_visualization=False,
+        )
+        self.assertFalse(ok)
+        self.assertIn("--confirm-mp-visualization", reason)
+
+
 class TestBuildExecutionPlanR2cStage(unittest.TestCase):
     def test_r2c_stage_step_order(self):
         plan = orch.build_execution_plan(make_args(profile="dynamic", stage="r2c"))
@@ -713,11 +1021,89 @@ class TestBuildExecutionPlanR2cStage(unittest.TestCase):
             self.assertNotIn("param_set", joined)
 
 
+class TestBuildExecutionPlanR3aStage(unittest.TestCase):
+    def test_r3a_stage_uses_visual_feeder_and_capture_comparison(self):
+        plan = orch.build_execution_plan(make_args(profile="visual", stage="r3a"))
+        names = [step.name for step in plan]
+        self.assertEqual(names, [
+            "check_adapters", "precheck",
+            "start_feeder", "start_responder",
+            "prompt_power_cycle", "wait_for_reattach", "ppp_start", "ppp_verify",
+            "wait_for_sim_json_replies", "run_origin_relatch_check", "wait_for_ekf_ready",
+            "start_motion_feeder",
+            "start_estimator_capture", "run_estimator_comparison", "ppp_stop",
+        ])
+        feeder_step = next(s for s in plan if s.name == "start_feeder")
+        joined = " ".join(feeder_step.command)
+        self.assertIn(str(orch.FEEDER_SCRIPT), joined)
+        self.assertIn("--airspeed-mps 0.0", joined)
+        motion_step = next(s for s in plan if s.name == "start_motion_feeder")
+        motion_joined = " ".join(motion_step.command)
+        self.assertIn(str(orch.DYNAMIC_FEEDER_SCRIPT), motion_joined)
+        self.assertIn(orch.VISUAL_FEEDER_JSBSIM_SCRIPT, motion_joined)
+        self.assertIn(orch.VISUAL_FEEDER_RAW_OUTPUT, motion_joined)
+        self.assertIn("--duration-s 65.0", motion_joined)
+        self.assertIn("--jsbsim-end 65.0", motion_joined)
+        capture_step = next(s for s in plan if s.name == "start_estimator_capture")
+        self.assertNotIn("--enable-mp-forward", " ".join(capture_step.command))
+
+    def test_r3a_motion_and_capture_wait_until_after_ekf_readiness(self):
+        plan = orch.build_execution_plan(make_args(profile="visual", stage="r3a"))
+        names = [step.name for step in plan]
+        self.assertLess(names.index("start_feeder"), names.index("prompt_power_cycle"))
+        self.assertLess(names.index("start_responder"), names.index("prompt_power_cycle"))
+        self.assertLess(names.index("run_origin_relatch_check"), names.index("wait_for_ekf_ready"))
+        self.assertLess(names.index("wait_for_ekf_ready"), names.index("start_motion_feeder"))
+        self.assertLess(names.index("start_motion_feeder"), names.index("start_estimator_capture"))
+        step = next(s for s in plan if s.name == "run_estimator_comparison")
+        joined = " ".join(step.command)
+        self.assertIn("--settle-s 0.0", joined)
+        self.assertIn("--health-ignore-before-s 0.0", joined)
+        self.assertIn("--require-ekf-ready-after-s 0.0", joined)
+
+    def test_r3a_responder_remains_log_only(self):
+        plan = orch.build_execution_plan(make_args(profile="visual", stage="r3a"))
+        responder_step = next(s for s in plan if s.name == "start_responder")
+        joined = " ".join(responder_step.command).lower()
+        self.assertNotIn("--jsbsim-command-target", joined)
+        self.assertNotIn("--actuator-map", joined)
+        self.assertNotIn("arm", joined)
+        self.assertNotIn("mission", joined)
+        self.assertNotIn("param_set", joined)
+
+    def test_r3a_mp_forwarding_is_opt_in_and_capture_remains_active(self):
+        plan = orch.build_execution_plan(make_args(
+            profile="visual", stage="r3a",
+            enable_mp_forward=True, mp_udp_host="192.168.1.10", mp_udp_port=14550,
+        ))
+        names = [step.name for step in plan]
+        self.assertIn("start_estimator_capture", names)
+        capture_step = next(s for s in plan if s.name == "start_estimator_capture")
+        joined = " ".join(capture_step.command)
+        self.assertIn("--enable-mp-forward", joined)
+        self.assertIn("--mp-udp-host 192.168.1.10", joined)
+        self.assertIn("--mp-udp-port 14550", joined)
+        self.assertIn("--pixhawk /dev/ttyACM0", joined)
+
+    def test_r2c_plan_unaffected_by_r3a_addition(self):
+        plan = orch.build_execution_plan(make_args(profile="dynamic", stage="r2c"))
+        step = next(s for s in plan if s.name == "start_feeder")
+        joined = " ".join(step.command)
+        self.assertIn(str(orch.DYNAMIC_FEEDER_SCRIPT), joined)
+        self.assertNotIn(orch.VISUAL_FEEDER_JSBSIM_SCRIPT, joined)
+        self.assertNotIn(orch.VISUAL_FEEDER_RAW_OUTPUT, joined)
+
+
 class TestBuildSessionDirR2cStage(unittest.TestCase):
     def test_r2c_stage_name_distinct(self):
         now = datetime(2026, 8, 6, 12, 0, 0, tzinfo=timezone.utc)
         path = orch.build_session_dir(Path("/tmp/sessions"), now=now, profile="dynamic", stage="r2c")
         self.assertEqual(path, Path("/tmp/sessions/sr75_hil_f24r2c_relatch_20260806T120000Z"))
+
+    def test_r3a_stage_name_distinct(self):
+        now = datetime(2026, 8, 6, 12, 0, 0, tzinfo=timezone.utc)
+        path = orch.build_session_dir(Path("/tmp/sessions"), now=now, profile="visual", stage="r3a")
+        self.assertEqual(path, Path("/tmp/sessions/sr75_hil_f24r3a_mp_visual_20260806T120000Z"))
 
 
 class TestMainR2cStageValidation(unittest.TestCase):
@@ -743,6 +1129,34 @@ class TestMainR2cStageValidation(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("run_origin_relatch_check", result.stdout)
         self.assertIn("prompt_power_cycle", result.stdout)
+        self.assertIn("dry-run", result.stdout)
+
+
+class TestMainR3aStageValidation(unittest.TestCase):
+    def test_stage_r3a_without_visual_profile_aborts_dry_run(self):
+        result = subprocess.run(
+            [sys.executable, str(orch.__file__), "--profile", "dynamic", "--stage", "r3a"],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--stage r3a requires --profile visual", result.stdout)
+
+    def test_visual_profile_without_r3a_aborts_dry_run(self):
+        result = subprocess.run(
+            [sys.executable, str(orch.__file__), "--profile", "visual"],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--profile visual requires --stage r3a", result.stdout)
+
+    def test_stage_r3a_dry_run_shows_visual_plan_and_never_prompts(self):
+        result = subprocess.run(
+            [sys.executable, str(orch.__file__), "--profile", "visual", "--stage", "r3a"],
+            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(orch.VISUAL_FEEDER_JSBSIM_SCRIPT, result.stdout)
+        self.assertIn("start_estimator_capture", result.stdout)
         self.assertIn("dry-run", result.stdout)
 
 
@@ -959,6 +1373,274 @@ class TestResponderBindBeforePPP(unittest.TestCase):
                 proc.kill()
 
 
+class TestR3aVisualTrajectoryXml(unittest.TestCase):
+    XML_PATH = Path(__file__).resolve().parents[2] / orch.VISUAL_FEEDER_JSBSIM_SCRIPT
+    GRAVITY_MSS = 9.80665
+    LAT0_DEG = 32.5378085
+    LON0_DEG = 74.3661944
+    ALT0_M = 240.201118
+    MOTION_S = 60.0
+    LAT_DELTA_DEG = 0.00161694
+    LON_DELTA_DEG = 0.00126792
+    ALT_DELTA_M = 30.0
+    ROLL_DELTA_RAD = 0.069813170
+    PITCH_DELTA_RAD = 0.052359878
+    YAW0_RAD = 5.497787144
+    YAW_DELTA_RAD = 0.261799388
+    NORTH_DELTA_M = 179.9977608
+    EAST_DELTA_M = 118.9902933
+    SPEED_DELTA_MPS = 217.8483046
+
+    def _root(self):
+        return ET.parse(self.XML_PATH).getroot()
+
+    def _trajectory_sample(self, t_s):
+        u = min(1.0, max(0.0, t_s / self.MOTION_S))
+        smooth = u * u * (3.0 - 2.0 * u)
+        smooth_dot = 0.1 * u * (1.0 - u)
+        roll = self.ROLL_DELTA_RAD * smooth
+        pitch = self.PITCH_DELTA_RAD * smooth
+        yaw = self.YAW0_RAD + self.YAW_DELTA_RAD * smooth
+        roll_dot = self.ROLL_DELTA_RAD * smooth_dot
+        pitch_dot = self.PITCH_DELTA_RAD * smooth_dot
+        yaw_dot = self.YAW_DELTA_RAD * smooth_dot
+        sr = math.sin(roll)
+        cr = math.cos(roll)
+        sp = math.sin(pitch)
+        cp = math.cos(pitch)
+        p = roll_dot - yaw_dot * sp
+        q = pitch_dot * cr + yaw_dot * sr * cp
+        r = -pitch_dot * sr + yaw_dot * cr * cp
+        ax = self.GRAVITY_MSS * sp
+        ay = -self.GRAVITY_MSS * sr * cp
+        az = -self.GRAVITY_MSS * cr * cp
+        return {
+            "lat_deg": self.LAT0_DEG + self.LAT_DELTA_DEG * smooth,
+            "lon_deg": self.LON0_DEG + self.LON_DELTA_DEG * smooth,
+            "alt_m": self.ALT0_M + self.ALT_DELTA_M * smooth,
+            "roll": roll,
+            "pitch": pitch,
+            "yaw": yaw,
+            "roll_dot": roll_dot,
+            "pitch_dot": pitch_dot,
+            "yaw_dot": yaw_dot,
+            "p": p,
+            "q": q,
+            "r": r,
+            "ax": ax,
+            "ay": ay,
+            "az": az,
+            "vn_mps": self.NORTH_DELTA_M * smooth_dot,
+            "ve_mps": self.EAST_DELTA_M * smooth_dot,
+            "vd_mps": -self.ALT_DELTA_M * smooth_dot,
+            "airspeed_mps": self.SPEED_DELTA_MPS * smooth_dot,
+        }
+
+    def _samples_0_to_65(self):
+        return [self._trajectory_sample(i * 0.5) for i in range(131)]
+
+    def test_output_fields_match_state_csv_contract(self):
+        names = [fn.attrib["name"] for fn in self._root().findall(".//function")]
+        self.assertEqual(set(names), set(state_feed.CSV_FIELDS))
+        self.assertEqual(len(names), len(state_feed.CSV_FIELDS))
+
+    def test_zero_control_and_propulsion_commands_only(self):
+        root = self._root()
+        sets = root.findall(".//set")
+        self.assertGreater(len(sets), 0)
+        for item in sets:
+            name = item.attrib["name"]
+            value = float(item.attrib["value"])
+            with self.subTest(name=name):
+                self.assertIn(name, {
+                    "propulsion/engine[0]/set-running",
+                    "propulsion/engine[1]/set-running",
+                    "propulsion/engine[2]/set-running",
+                    "fcs/turbojet-throttle-cmd-norm",
+                    "fcs/rato-throttle-cmd-norm",
+                    "fcs/throttle-cmd-norm",
+                    "fcs/aileron-cmd-norm",
+                    "fcs/elevator-cmd-norm",
+                    "fcs/rudder-cmd-norm",
+                })
+                self.assertEqual(value, 0.0)
+
+    def test_trajectory_samples_are_finite_over_visualization_window(self):
+        for sample in self._samples_0_to_65():
+            for name, value in sample.items():
+                with self.subTest(name=name, value=value):
+                    self.assertTrue(math.isfinite(value))
+
+    def test_transition_starts_and_ends_without_position_attitude_or_rate_jump(self):
+        start = self._trajectory_sample(0.0)
+        just_after = self._trajectory_sample(0.02)
+        end = self._trajectory_sample(self.MOTION_S)
+        after_end = self._trajectory_sample(self.MOTION_S + 1.0)
+        self.assertAlmostEqual(just_after["lat_deg"], start["lat_deg"], delta=1e-9)
+        self.assertAlmostEqual(just_after["roll"], start["roll"], delta=1e-7)
+        self.assertAlmostEqual(just_after["pitch"], start["pitch"], delta=1e-7)
+        self.assertGreaterEqual(just_after["vn_mps"], 0.0)
+        self.assertGreaterEqual(just_after["airspeed_mps"], 0.0)
+        for field in ("roll_dot", "pitch_dot", "yaw_dot", "p", "q", "r", "vn_mps", "ve_mps", "vd_mps", "airspeed_mps"):
+            self.assertAlmostEqual(start[field], 0.0, places=9)
+            self.assertAlmostEqual(end[field], 0.0, places=9)
+            self.assertAlmostEqual(after_end[field], 0.0, places=9)
+        self.assertEqual(end["lat_deg"], after_end["lat_deg"])
+        self.assertEqual(end["lon_deg"], after_end["lon_deg"])
+        self.assertEqual(end["alt_m"], after_end["alt_m"])
+
+    def test_gravity_vector_tracks_scripted_roll_and_pitch(self):
+        for sample in self._samples_0_to_65():
+            magnitude = math.sqrt(sample["ax"] ** 2 + sample["ay"] ** 2 + sample["az"] ** 2)
+            self.assertAlmostEqual(magnitude, self.GRAVITY_MSS, places=6)
+            self.assertAlmostEqual(sample["ax"], self.GRAVITY_MSS * math.sin(sample["pitch"]), places=9)
+            self.assertAlmostEqual(
+                sample["ay"],
+                -self.GRAVITY_MSS * math.sin(sample["roll"]) * math.cos(sample["pitch"]),
+                places=9,
+            )
+            self.assertAlmostEqual(
+                sample["az"],
+                -self.GRAVITY_MSS * math.cos(sample["roll"]) * math.cos(sample["pitch"]),
+                places=9,
+            )
+
+    def test_body_rates_match_scripted_euler_rates(self):
+        for sample in self._samples_0_to_65():
+            roll = sample["roll"]
+            pitch = sample["pitch"]
+            p = sample["p"]
+            q = sample["q"]
+            r = sample["r"]
+            roll_dot = p + q * math.sin(roll) * math.tan(pitch) + r * math.cos(roll) * math.tan(pitch)
+            pitch_dot = q * math.cos(roll) - r * math.sin(roll)
+            yaw_dot = (q * math.sin(roll) + r * math.cos(roll)) / math.cos(pitch)
+            self.assertAlmostEqual(roll_dot, sample["roll_dot"], places=9)
+            self.assertAlmostEqual(pitch_dot, sample["pitch_dot"], places=9)
+            self.assertAlmostEqual(yaw_dot, sample["yaw_dot"], places=9)
+
+    def test_trajectory_bounds_and_continuity_constants(self):
+        duration_s = orch.DEFAULT_VISUALIZATION_DURATION_S
+        first = self._trajectory_sample(0.0)
+        last = self._trajectory_sample(duration_s)
+        north_m = (last["lat_deg"] - first["lat_deg"]) * 111320.0
+        east_m = (
+            (last["lon_deg"] - first["lon_deg"])
+            * 111320.0
+            * math.cos(math.radians(first["lat_deg"]))
+        )
+        horizontal_m = math.hypot(north_m, east_m)
+        alt_change_m = last["alt_m"] - first["alt_m"]
+        yaw_change_deg = math.degrees(last["yaw"] - first["yaw"])
+        self.assertGreaterEqual(horizontal_m, 100.0)
+        self.assertLessEqual(horizontal_m, 300.0)
+        self.assertGreaterEqual(alt_change_m, 20.0)
+        self.assertLessEqual(alt_change_m, 40.0)
+        self.assertLessEqual(max(abs(math.degrees(s["roll"])) for s in self._samples_0_to_65()), 5.0)
+        self.assertLessEqual(max(abs(math.degrees(s["pitch"])) for s in self._samples_0_to_65()), 5.0)
+        self.assertLessEqual(abs(yaw_change_deg), 20.0)
+        self.assertTrue(math.isfinite(math.hypot(first["vn_mps"], first["ve_mps"])))
+        self.assertGreater(last["lat_deg"], first["lat_deg"])
+        self.assertGreater(last["lon_deg"], first["lon_deg"])
+
+    def test_default_visualization_window_is_sixty_seconds(self):
+        run = self._root().find(".//run")
+        self.assertGreater(float(run.attrib["end"]), orch.DEFAULT_VISUALIZATION_DURATION_S)
+        self.assertEqual(orch.DEFAULT_VISUALIZATION_DURATION_S, 60.0)
+
+    def test_visual_time_source_uses_airborne_initializer(self):
+        use = self._root().find(".//use")
+        self.assertEqual(use.attrib["initialize"], "hil_f24r3a_visual_time_source_init")
+
+    @unittest.skipUnless(shutil.which("JSBSim") is not None, "JSBSim binary not found on PATH")
+    def test_real_time_visual_feeder_runs_full_sixty_five_seconds(self):
+        tmpdir = Path(tempfile.mkdtemp(prefix="hil_f24r3g_visual_65s_"))
+        state_csv = tmpdir / "state.csv"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve().parents[1] / "sim_json" / "sr75_hil_f24r1_dynamic_jsbsim_feed.py"),
+                "--output", str(state_csv),
+                "--duration-s", "65",
+                "--jsbsim-script", orch.VISUAL_FEEDER_JSBSIM_SCRIPT,
+                "--raw-output", orch.VISUAL_FEEDER_RAW_OUTPUT,
+                "--jsbsim-end", "65",
+            ],
+            capture_output=True, text=True, timeout=90,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("JSBSIM_SUMMARY", proc.stdout)
+        match = re.search(r"final_time_s=([0-9.]+)", proc.stdout)
+        self.assertIsNotNone(match, proc.stdout)
+        self.assertGreaterEqual(float(match.group(1)), 64.5)
+
+
+class FakeStateReader:
+    def __init__(self, age_s):
+        self.age_s = age_s
+
+    def read_latest(self):
+        return {"time_s": "1.0"}, "line", self.age_s, None
+
+
+class FakeProcess:
+    def __init__(self, returncode=None):
+        self.returncode = returncode
+
+    def poll(self):
+        return self.returncode
+
+
+class TestR3aTruthFeedMonitor(unittest.TestCase):
+    def _clock(self):
+        now = {"t": 0.0}
+        return lambda: now["t"], lambda s: now.__setitem__("t", now["t"] + s)
+
+    def test_early_feeder_exit_causes_immediate_abort(self):
+        tmpdir = Path(tempfile.mkdtemp(prefix="hil_f24r3d_exit_"))
+        log = tmpdir / "feeder.log"
+        log.write_text("JSBSIM_STALL_WARNING\nJSBSIM_SUMMARY final_time_s=7.26\n")
+        ok, reason = orch.monitor_r3a_truth_feed(
+            FakeProcess(returncode=9), tmpdir / "state.csv", log, duration_s=60.0,
+            reader_factory=lambda _path: FakeStateReader(0.0),
+        )
+        self.assertFalse(ok)
+        self.assertIn("feeder exited early rc=9", reason)
+        self.assertIn("final_time_s=7.26", reason)
+
+    def test_stale_state_causes_immediate_abort(self):
+        tmpdir = Path(tempfile.mkdtemp(prefix="hil_f24r3d_stale_"))
+        log = tmpdir / "feeder.log"
+        log.write_text("JSBSIM_STALL_WARNING\n")
+        ok, reason = orch.monitor_r3a_truth_feed(
+            FakeProcess(returncode=None), tmpdir / "state.csv", log, duration_s=60.0,
+            max_state_age_s=0.5,
+            reader_factory=lambda _path: FakeStateReader(1.0),
+        )
+        self.assertFalse(ok)
+        self.assertIn("state.csv stale", reason)
+
+    def test_fresh_state_full_window_succeeds(self):
+        tmpdir = Path(tempfile.mkdtemp(prefix="hil_f24r3d_fresh_"))
+        log = tmpdir / "feeder.log"
+        log.write_text("running\n")
+        now_fn, sleep_fn = self._clock()
+        ok, reason = orch.monitor_r3a_truth_feed(
+            FakeProcess(returncode=None), tmpdir / "state.csv", log, duration_s=1.0,
+            max_state_age_s=0.5, poll_interval_s=0.25,
+            reader_factory=lambda _path: FakeStateReader(0.01),
+            now_fn=now_fn, sleep_fn=sleep_fn,
+        )
+        self.assertTrue(ok)
+        self.assertIn("remained live", reason)
+
+    def test_no_comparison_after_invalid_truth_feed(self):
+        self.assertFalse(orch.should_run_estimator_comparison("r3a", object(), truth_feed_valid=False))
+        self.assertTrue(orch.should_run_estimator_comparison("r3a", object(), truth_feed_valid=True))
+        self.assertTrue(orch.should_run_estimator_comparison("r2c", object(), truth_feed_valid=True))
+        self.assertFalse(orch.should_run_estimator_comparison("none", object(), truth_feed_valid=True))
+
+
 class TestR2cPppReconnectRetries(unittest.TestCase):
     """HIL-F24-R2G: R2C-only bounded PPP reconnect retry logic."""
 
@@ -1142,6 +1824,77 @@ ping Pixhawk PPP endpoint (192.168.144.14):
         self.assertIn("attempt 2/2 succeeded", reason)
         start_names = [c[2] for c in calls if c[2].endswith("_start.log")]
         self.assertEqual(start_names, ["ppp_r2c_attempt_1_start.log", "ppp_r2c_attempt_2_start.log"])
+
+
+class TestR3aPppReadinessRetries(TestR2cPppReconnectRetries):
+    """HIL-F24-R3C: R3A reuses the shared bounded PPP readiness helper."""
+
+    def _plan(self):
+        plan = orch.build_execution_plan(make_args(profile="visual", stage="r3a"))
+        return {step.name: step for step in plan}
+
+    def test_r3a_delayed_ppp_success_within_first_attempt(self):
+        args = make_args(
+            profile="visual", stage="r3a",
+            relatch_ppp_retry_attempts=3,
+            relatch_ppp_health_timeout_s=10.0,
+            relatch_ppp_health_poll_s=2.0,
+        )
+        tmpdir = Path(tempfile.mkdtemp(prefix="hil_f24r3a_ppp_delay_"))
+        calls = []
+        _now, now_fn, sleep_fn = self._clock()
+        ok, reason = orch.restart_ppp_with_retries(
+            args, self._plan(), tmpdir, "R3A",
+            run_step_fn=self._runner([""], [self.DOWN_STATUS, self.PARTIAL_PING_STATUS, self.HEALTHY_STATUS], calls),
+            sleep_fn=sleep_fn, now_fn=now_fn, print_fn=lambda s: None,
+        )
+        self.assertTrue(ok)
+        self.assertIn("attempt 1/3 succeeded", reason)
+        self.assertEqual(len([c for c in calls if c[2].endswith("_start.log")]), 1)
+        self.assertEqual(len([c for c in calls if c[0].startswith("ppp_cleanup")]), 3)
+        self.assertEqual(len([c for c in calls if "_verify_" in c[2]]), 3)
+
+    def test_r3a_first_attempt_timeout_second_succeeds(self):
+        args = make_args(
+            profile="visual", stage="r3a",
+            relatch_ppp_retry_attempts=3,
+            relatch_ppp_retry_delay_s=0.0,
+            relatch_ppp_health_timeout_s=4.0,
+            relatch_ppp_health_poll_s=2.0,
+        )
+        tmpdir = Path(tempfile.mkdtemp(prefix="hil_f24r3a_ppp_second_"))
+        calls = []
+        _now, now_fn, sleep_fn = self._clock()
+        ok, reason = orch.restart_ppp_with_retries(
+            args, self._plan(), tmpdir, "R3A",
+            run_step_fn=self._runner(["", ""], [self.DOWN_STATUS, self.DOWN_STATUS, self.HEALTHY_STATUS], calls),
+            sleep_fn=sleep_fn, now_fn=now_fn, print_fn=lambda s: None,
+        )
+        self.assertTrue(ok)
+        self.assertIn("attempt 2/3 succeeded", reason)
+        self.assertEqual(len([c for c in calls if c[2].endswith("_start.log")]), 2)
+        self.assertEqual(len([c for c in calls if c[0].startswith("ppp_cleanup")]), 6)
+
+    def test_r3a_no_cleanup_between_health_polls(self):
+        args = make_args(
+            profile="visual", stage="r3a",
+            relatch_ppp_retry_attempts=3,
+            relatch_ppp_health_timeout_s=10.0,
+            relatch_ppp_health_poll_s=2.0,
+        )
+        tmpdir = Path(tempfile.mkdtemp(prefix="hil_f24r3a_ppp_no_cleanup_"))
+        calls = []
+        _now, now_fn, sleep_fn = self._clock()
+        ok, _reason = orch.restart_ppp_with_retries(
+            args, self._plan(), tmpdir, "R3A",
+            run_step_fn=self._runner([""], [self.DOWN_STATUS, self.PARTIAL_PING_STATUS, self.HEALTHY_STATUS], calls),
+            sleep_fn=sleep_fn, now_fn=now_fn, print_fn=lambda s: None,
+        )
+        self.assertTrue(ok)
+        call_names = [c[0] for c in calls]
+        self.assertEqual(call_names[:3], ["ppp_cleanup_stop", "ppp_cleanup_pid", "ppp_cleanup_ppp0"])
+        self.assertEqual(call_names[3], "ppp_start")
+        self.assertEqual(call_names[4:], ["ppp_verify", "ppp_verify", "ppp_verify"])
 
 
 class TestR2cFeederDuration(unittest.TestCase):

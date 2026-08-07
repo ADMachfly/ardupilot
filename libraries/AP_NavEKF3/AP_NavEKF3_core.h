@@ -137,6 +137,16 @@ public:
     // This method can only be used when the vehicle is static
     bool InitialiseFilterBootstrap(void);
 
+    // pure helper for InitialiseFilterBootstrap()'s bootstrap tilt-init accel
+    // averaging: returns sum/count, or a zero vector if count is zero. Exposed
+    // as a static method (no instance state) so it can be unit tested directly.
+    static Vector3F average_accel_vector(const Vector3F &sum, uint32_t count) {
+        if (count == 0) {
+            return Vector3F();
+        }
+        return sum / ftype(count);
+    }
+
     // Update Filter States - this should be called whenever new IMU data is available
     // The predict flag is set true when a new prediction cycle can be started
     void UpdateFilter(bool predict);
@@ -1258,6 +1268,8 @@ private:
     Vector3F posOffsetNED;          // This adds to the earth frame position estimate at the IMU to give the position at the body origin (m)
     uint32_t firstInitTime_ms;      // First time the initialise function was called (msec)
     uint32_t lastInitFailReport_ms; // Last time the buffer initialisation failure report was sent (msec)
+    Vector3F initAccVecSum;         // running sum of accelerometer samples accumulated over the bootstrap tilt-init window (m/s^2)
+    uint32_t initAccVecCount;       // number of samples accumulated into initAccVecSum since the bootstrap window started
     ftype tiltErrorVariance;        // variance of the angular uncertainty measured perpendicular to the vertical (rad^2)
 
     // variables used to calculate a vertical velocity that is kinematically consistent with the vertical position

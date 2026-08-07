@@ -15,6 +15,8 @@ NavEKF3_core::NavEKF3_core(NavEKF3 *_frontend, AP_DAL &_dal) :
 {
     firstInitTime_ms = 0;
     lastInitFailReport_ms = 0;
+    initAccVecSum.zero();
+    initAccVecCount = 0;
 }
 
 // setup this core backend
@@ -496,20 +498,35 @@ bool NavEKF3_core::InitialiseFilterBootstrap(void)
 
     // accumulate enough sensor data to fill the buffers
     if (firstInitTime_ms == 0) {
+        // start of a new bootstrap attempt: reset the tilt-init accel accumulator
         firstInitTime_ms = imuSampleTime_ms;
+        initAccVecSum.zero();
+        initAccVecCount = 0;
+        initAccVecSum += dal.ins().get_accel(accel_index_active).toftype();
+        initAccVecCount++;
         return false;
     } else if (imuSampleTime_ms - firstInitTime_ms < 1000) {
+        // still within the bootstrap accumulation window: accumulate this cycle's
+        // accel sample so the tilt is initialised from an average, not one instant
+        initAccVecSum += dal.ins().get_accel(accel_index_active).toftype();
+        initAccVecCount++;
         return false;
     }
 
     // set re-used variables to zero
     InitialiseVariables();
 
-    // acceleration vector in XYZ body axes measured by the IMU (m/s^2)
-    Vector3F initAccVec;
-
-    // TODO we should average accel readings over several cycles
-    initAccVec = dal.ins().get_accel(accel_index_active).toftype();
+    // acceleration vector in XYZ body axes measured by the IMU (m/s^2), averaged
+    // over the accumulation window above to reduce sensitivity to a momentary
+    // startup transient in a single instantaneous sample. Falls back to a fresh
+    // instantaneous sample if the accumulator is empty (e.g. a forced re-init
+    // that never passed through the accumulation window above).
+    Vector3F initAccVec = average_accel_vector(initAccVecSum, initAccVecCount);
+    if (initAccVecCount == 0) {
+        initAccVec = dal.ins().get_accel(accel_index_active).toftype();
+    }
+    initAccVecSum.zero();
+    initAccVecCount = 0;
 
     // normalise the acceleration vector
     ftype pitch=0, roll=0;

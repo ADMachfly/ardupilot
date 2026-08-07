@@ -193,6 +193,9 @@ def main():
     if param_blockers:
         print(f"WARN: GPS/EKF param blockers: {', '.join(param_blockers)}")
         ok = False
+    if origin is None:
+        print("WARN: GPS_GLOBAL_ORIGIN was not received; HOME_POSITION alone is not an EKF-origin relatch")
+        ok = False
     if origin_mismatch_m is not None and origin_mismatch_m > ORIGIN_MISMATCH_WARN_M:
         print(f"WARN: HOME/origin vs. truth horizontal mismatch {origin_mismatch_m:.2f} m "
               f"exceeds diagnostic-only tolerance {ORIGIN_MISMATCH_WARN_M} m")
